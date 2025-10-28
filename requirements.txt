@@ -3,3 +3,4 @@ spacy
 wordfreq
 lemminflect
 pyyaml
+wn
