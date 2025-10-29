@@ -1,9 +1,16 @@
 import random, spacy, yaml, time
+from pathlib import Path
 from .io import load_blimp, write_jsonl
 from .becl import load_becl_tsv
 from .quantifier import load_quant_rules, requirement
-from .edits import noun_swap_all, candidate_nouns
+from .edits import (
+    noun_swap_all,
+    candidate_nouns,
+    person_name_candidates,
+    person_name_swap,
+)
 from .rarity import is_rare_lemma
+from .names import NameBank
 
 
 def _format_duration(seconds):
@@ -41,7 +48,10 @@ def _print_progress(done, total, start_time, last_update, width=30):
 
 def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 noun_mode="all", k=2, zipf_thr=3.4, rare_lemmas=None, seed=0,
-                show_progress=True):
+                show_progress=True,
+                rare_name_path="data/external/rare_names.tsv",
+                name_lookup_path="data/external/name_gender_lookup.tsv",
+                name_conf=0.75):
     base_rng = random.Random(seed)
     nlp = spacy.load("en_core_web_sm")
     with open(tier_cfg_path, encoding="utf-8") as f:
@@ -49,6 +59,19 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
     becl_map = load_becl_tsv(becl_path)
     qrules = load_quant_rules(quant_cfg_path)
     records = []
+
+    name_bank = None
+    rare_name_path = Path(rare_name_path) if rare_name_path else None
+    name_lookup_path = Path(name_lookup_path) if name_lookup_path else None
+    if rare_name_path and name_lookup_path:
+        try:
+            name_bank = NameBank(rare_name_path, name_lookup_path, min_lookup_confidence=name_conf)
+        except FileNotFoundError:
+            print(f"[NameBank] Skipping name swaps; missing files {rare_name_path} or {name_lookup_path}.")
+            name_bank = None
+        except ValueError as exc:
+            print(f"[NameBank] Skipping name swaps: {exc}")
+            name_bank = None
 
     if rare_lemmas:
         seen = set()
@@ -95,54 +118,135 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
 
                 # Per-pair RNG so Good/Bad use the same sequence of choices
                 pair_seed = hash((group_name, cfg, i)) & 0xFFFFFFFF
-                rng = random.Random(pair_seed)
 
+                # Stage 1: noun swaps
                 g_candidates = candidate_nouns(gdoc)
                 g_candidates.sort(key=lambda t: t.i)
                 b_candidates = candidate_nouns(bdoc)
-                shared_indices = {t.i for t in b_candidates}
-                target_specs = [
-                    (tok.i, tok.tag_)
-                    for tok in g_candidates
-                    if tok.i in shared_indices
-                ]
-                if noun_mode == "k":
-                    limit = max(0, min(k, len(target_specs)))
-                    target_specs = target_specs[:limit]
+                b_candidates.sort(key=lambda t: t.i)
 
-                if target_specs:
+                noun_matches = []
+                used_bad_indices = set()
+
+                def _find_match(g_tok):
+                    g_lemma = g_tok.lemma_.lower()
+                    g_text = g_tok.text.lower()
+                    for b_tok in b_candidates:
+                        if b_tok.i in used_bad_indices:
+                            continue
+                        if b_tok.lemma_.lower() == g_lemma:
+                            return b_tok
+                    for b_tok in b_candidates:
+                        if b_tok.i in used_bad_indices:
+                            continue
+                        if b_tok.text.lower() == g_text:
+                            return b_tok
+                    return None
+
+                for g_tok in g_candidates:
+                    b_match = _find_match(g_tok)
+                    if b_match is None:
+                        continue
+                    noun_matches.append(
+                        ((g_tok.i, g_tok.tag_), (b_match.i, b_match.tag_))
+                    )
+                    used_bad_indices.add(b_match.i)
+
+                if noun_mode == "k" and noun_matches:
+                    limit = max(0, min(k, len(noun_matches)))
+                    noun_matches = noun_matches[:limit]
+
+                g_swaps, b_swaps = [], []
+                g_variant = g
+                b_variant = b
+                noun_changed = False
+
+                if noun_matches:
+                    g_target_specs = [spec for spec, _ in noun_matches]
+                    b_target_specs = [spec for _, spec in noun_matches]
                     rng = random.Random(pair_seed)
                     g_rare, g_swaps = noun_swap_all(
                         gdoc, rare_pool,
                         noun_mode=noun_mode, k=k, zipf_thr=None,
                         becl_map=becl_map, req=req_g, rng=rng,
-                        forced_targets=target_specs
+                        forced_targets=g_target_specs
                     )
-                    # Reuse the SAME rng sequence for Bad by re-seeding with the same seed
                     rng = random.Random(pair_seed)
                     b_rare, b_swaps = noun_swap_all(
                         bdoc, rare_pool,
                         noun_mode=noun_mode, k=k, zipf_thr=None,
                         becl_map=becl_map, req=req_b, rng=rng,
-                        forced_targets=target_specs
+                        forced_targets=b_target_specs
                     )
-                else:
-                    g_rare, g_swaps = None, []
-                    b_rare, b_swaps = None, []
+                    if (
+                        g_rare
+                        and b_rare
+                        and g_swaps
+                        and b_swaps
+                        and len(g_swaps) == len(b_swaps)
+                    ):
+                        g_variant = g_rare
+                        b_variant = b_rare
+                        noun_changed = True
 
-                # Only set good_rare and bad_rare if both variants received aligned swaps
-                if (
-                    g_rare
-                    and b_rare
-                    and g_swaps
-                    and b_swaps
-                    and len(g_swaps) == len(b_swaps)
-                ):
-                    good_rare_val = g_rare
-                    bad_rare_val = b_rare
-                else:
+                # Stage 2: proper-name swaps (after noun swaps)
+                g_name_swaps, b_name_swaps = [], []
+                name_changed = False
+                if name_bank:
+                    gdoc_after = nlp(g_variant)
+                    bdoc_after = nlp(b_variant)
+                    g_name_candidates = person_name_candidates(gdoc_after, name_bank)
+                    b_name_candidates = person_name_candidates(bdoc_after, name_bank)
+
+                    if g_name_candidates or b_name_candidates:
+                        if len(g_name_candidates) == len(b_name_candidates) and g_name_candidates:
+                            used_bad = set()
+                            name_matches = []
+                            success = True
+                            for g_tok, g_gender in g_name_candidates:
+                                match = None
+                                for b_tok, b_gender in b_name_candidates:
+                                    if b_tok.i in used_bad:
+                                        continue
+                                    if b_tok.text.lower() == g_tok.text.lower() and b_gender == g_gender:
+                                        match = (b_tok.i, b_gender)
+                                        break
+                                if match is None:
+                                    success = False
+                                    break
+                                used_bad.add(match[0])
+                                name_matches.append(((g_tok.i, g_gender), match))
+                            if success and len(name_matches) == len(b_name_candidates):
+                                name_seed = (pair_seed + 0x9E3779B9) & 0xFFFFFFFF
+                                rng_names = random.Random(name_seed)
+                                g_targets = [spec for spec, _ in name_matches]
+                                b_targets = [spec for _, spec in name_matches]
+
+                                g_name_text, g_name_swaps = person_name_swap(
+                                    gdoc_after, name_bank, rng=rng_names, forced_targets=g_targets
+                                )
+                                rng_names = random.Random(name_seed)
+                                b_name_text, b_name_swaps = person_name_swap(
+                                    bdoc_after, name_bank, rng=rng_names, forced_targets=b_targets
+                                )
+                                if (
+                                    g_name_text
+                                    and b_name_text
+                                    and g_name_swaps
+                                    and b_name_swaps
+                                    and len(g_name_swaps) == len(b_name_swaps)
+                                ):
+                                    g_variant = g_name_text
+                                    b_variant = b_name_text
+                                    name_changed = True
+                        # else: mismatch in number of candidates; skip name swap
+
+                if not (noun_changed or name_changed):
                     good_rare_val = None
                     bad_rare_val = None
+                else:
+                    good_rare_val = g_variant
+                    bad_rare_val = b_variant
 
                 records.append({
                     "group": group_name,
@@ -156,9 +260,13 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                     "meta": {
                         "g_swaps": g_swaps,
                         "b_swaps": b_swaps,
+                        "g_name_swaps": g_name_swaps,
+                        "b_name_swaps": b_name_swaps,
                         "noun_mode": noun_mode,
                         "k": k,
                         "zipf_thr": zipf_thr,
+                        "name_swapped": name_changed,
+                        "noun_swapped": noun_changed,
                         "req_good": req_g,
                         "req_bad": req_b
                     }

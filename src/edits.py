@@ -3,8 +3,10 @@ from typing import Optional
 
 from .inflect import inflect_noun
 from .rarity import is_rare_lemma
+from .names import NameBank
 
 _PARTITIVE_HEADS = {"lot", "lots", "bunch", "number", "couple", "plenty"}
+_UPPER_SPECIAL = {"ii", "iii", "iv"}
 
 
 def _is_partitive_quantifier(token):
@@ -51,6 +53,35 @@ def _adjust_indefinite_articles(toks):
         desired = "an" if first in vowels else "a"
         if lower != desired:
             toks[i] = desired.capitalize() if word[0].isupper() else desired
+
+
+def _detokenize(toks):
+    attach_no_space = {".", ",", "!", "?", ";", ":", "n't", "'s", "'re", "'ve", "'d", "'ll", "'m"}
+    text = ""
+    prev = ""
+    for tok in toks:
+        if not tok:
+            continue
+        if not text:
+            text = tok
+        else:
+            if tok in attach_no_space or tok.startswith("'") or prev == "'":
+                text += tok
+            else:
+                text += " " + tok
+        prev = tok
+    return text
+
+
+def _match_casing(template: str, replacement: str) -> str:
+    repl = replacement
+    if template.isupper() or template in _UPPER_SPECIAL:
+        return repl.upper()
+    if template.istitle():
+        return repl.title()
+    if template.islower():
+        return repl.lower()
+    return repl.title() if template[:1].isupper() else repl.lower()
 
 
 def candidate_nouns(doc):
@@ -174,19 +205,76 @@ def noun_swap_all(
         return None, swaps
 
     _adjust_indefinite_articles(toks)
-
-    text = " ".join(toks)
-    # light detokenization to clean spaces before punctuation
-    text = (
-        text.replace(" .", ".")
-            .replace(" ,", ",")
-            .replace(" !", "!")
-            .replace(" ?", "?")
-            .replace(" ;", ";")
-            .replace(" :", ":")
-            .replace(" n't", "n't")
-    )
+    text = _detokenize(toks)
     # Capitalize the first character of the sentence
+    if text:
+        text = text[0].upper() + text[1:]
+    return text, swaps
+
+
+def person_name_candidates(doc, name_bank: NameBank):
+    """
+    Return a sorted list of (token, gender) pairs for person-name tokens that can be swapped.
+    """
+    candidates = []
+    for token in doc:
+        if token.pos_ != "PROPN":
+            continue
+        text = token.text.strip()
+        if not text or not text[0].isalpha():
+            continue
+        gender = name_bank.gender_for(text)
+        if gender is None:
+            continue
+        candidates.append((token, gender))
+    candidates.sort(key=lambda item: item[0].i)
+    return candidates
+
+
+def person_name_swap(
+    doc,
+    name_bank: NameBank,
+    rng: Optional[random.Random] = None,
+    forced_targets=None,
+):
+    """
+    Swap person names using the supplied NameBank. Returns (text, swaps).
+    forced_targets: optional iterable of (index, gender) to override detection.
+    """
+    if rng is None:
+        rng = random
+
+    toks = [t.text for t in doc]
+    swaps = []
+
+    if forced_targets is not None:
+        targets = []
+        seen = set()
+        for idx, gender in forced_targets:
+            if not isinstance(idx, int):
+                continue
+            if idx < 0 or idx >= len(doc):
+                continue
+            if idx in seen:
+                continue
+            token = doc[idx]
+            targets.append((token, gender))
+            seen.add(idx)
+    else:
+        targets = person_name_candidates(doc, name_bank)
+
+    if not targets:
+        return None, swaps
+
+    for token, gender in targets:
+        new_lower = name_bank.sample(gender, rng)
+        if not new_lower:
+            return None, swaps
+        form = _match_casing(token.text, new_lower)
+        toks[token.i] = form
+        swaps.append({"i": token.i, "old": token.text, "new": form, "gender": gender})
+
+    text = _detokenize(toks)
     if text:
         text = text[0].upper() + text[1:]
     return text, swaps

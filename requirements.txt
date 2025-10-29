@@ -4,3 +4,5 @@ wordfreq
 lemminflect
 pyyaml
 wn
+ucimlrepo
+pandas

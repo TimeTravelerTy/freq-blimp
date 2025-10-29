@@ -20,6 +20,9 @@ if __name__ == "__main__":
     ap.add_argument("--oewn_zipf_min", type=float, default=None)
     ap.add_argument("--oewn_min_len", type=int, default=3)
     ap.add_argument("--oewn_limit", type=int, default=None)
+    ap.add_argument("--rare_name_path", default="data/external/rare_names.tsv")
+    ap.add_argument("--name_lookup_path", default="data/external/name_gender_lookup.tsv")
+    ap.add_argument("--name_conf", type=float, default=0.75)
     args = ap.parse_args()
 
     rare = json.loads(args.rare_lemmas) if args.rare_lemmas else []
@@ -38,4 +41,7 @@ if __name__ == "__main__":
 
     build_pilot(args.tier_cfg, args.becl_path, args.quant_cfg, args.out,
                 noun_mode=args.noun_mode, k=args.k, zipf_thr=args.zipf,
-                rare_lemmas=rare, seed=args.seed)
+                rare_lemmas=rare, seed=args.seed,
+                rare_name_path=args.rare_name_path,
+                name_lookup_path=args.name_lookup_path,
+                name_conf=args.name_conf)
