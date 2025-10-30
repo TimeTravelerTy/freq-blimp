@@ -8,9 +8,11 @@ from .edits import (
     candidate_nouns,
     person_name_candidates,
     person_name_swap,
+    reflexive_subject_indices,
 )
 from .rarity import is_rare_lemma
 from .names import NameBank
+from .lemma_bank import is_person_noun
 
 
 def _format_duration(seconds):
@@ -89,6 +91,11 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
     else:
         rare_pool = tuple()
 
+    if rare_pool:
+        rare_person_pool = tuple(lemma for lemma in rare_pool if is_person_noun(lemma))
+    else:
+        rare_person_pool = tuple()
+
     worklist = []
     total_items = 0
 
@@ -111,6 +118,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
         for i, r in enumerate(ds):
                 g, b = r["sentence_good"], r["sentence_bad"]
                 gdoc, bdoc = nlp(g), nlp(b)
+                g_reflexive_subjects = reflexive_subject_indices(gdoc)
+                b_reflexive_subjects = reflexive_subject_indices(bdoc)
 
                 # Quantifier requirement per sentence
                 req_g = requirement(gdoc, qrules)  # None/COUNT/MASS
@@ -162,21 +171,36 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 noun_changed = False
 
                 if noun_matches:
-                    g_target_specs = [spec for spec, _ in noun_matches]
-                    b_target_specs = [spec for _, spec in noun_matches]
+                    g_target_specs = []
+                    b_target_specs = []
+                    for g_spec, b_spec in noun_matches:
+                        g_idx, g_tag = g_spec
+                        b_idx, b_tag = b_spec
+                        g_target_specs.append({
+                            "i": g_idx,
+                            "tag": g_tag,
+                            "require_person": g_idx in g_reflexive_subjects,
+                        })
+                        b_target_specs.append({
+                            "i": b_idx,
+                            "tag": b_tag,
+                            "require_person": b_idx in b_reflexive_subjects,
+                        })
                     rng = random.Random(pair_seed)
                     g_rare, g_swaps = noun_swap_all(
                         gdoc, rare_pool,
                         noun_mode=noun_mode, k=k, zipf_thr=None,
                         becl_map=becl_map, req=req_g, rng=rng,
-                        forced_targets=g_target_specs
+                        forced_targets=g_target_specs,
+                        rare_person_lemmas=rare_person_pool
                     )
                     rng = random.Random(pair_seed)
                     b_rare, b_swaps = noun_swap_all(
                         bdoc, rare_pool,
                         noun_mode=noun_mode, k=k, zipf_thr=None,
                         becl_map=becl_map, req=req_b, rng=rng,
-                        forced_targets=b_target_specs
+                        forced_targets=b_target_specs,
+                        rare_person_lemmas=rare_person_pool
                     )
                     if (
                         g_rare

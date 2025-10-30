@@ -149,3 +149,56 @@ def sample_rare_nouns_from_oewn(
     if limit is not None:
         rare = rare[:max(0, limit)]
     return rare
+
+
+@lru_cache(maxsize=4096)
+def _is_person_noun_cached(lemma: str, lexicon: str) -> bool:
+    if not lemma:
+        return False
+    # Ensure the lexicon is available; re-use the loader cache.
+    _load_lexicon(lexicon)
+    try:
+        synsets = wn.synsets(lemma, pos="n", lexicon=lexicon)
+    except Exception:
+        return False
+    for syn in synsets:
+        lex_domain = None
+        try:
+            lex_domain = syn.lexdomain()
+        except AttributeError:
+            pass
+        if lex_domain is not None and getattr(lex_domain, "id", None) == "noun.person":
+            return True
+        try:
+            if syn.lexname() == "noun.person":
+                return True
+        except AttributeError:
+            pass
+        try:
+            hypernyms = syn.hypernyms()
+        except AttributeError:
+            hypernyms = ()
+        for hyper in hypernyms:
+            hyper_domain = None
+            try:
+                hyper_domain = hyper.lexdomain()
+            except AttributeError:
+                pass
+            if hyper_domain is not None and getattr(hyper_domain, "id", None) == "noun.person":
+                return True
+            try:
+                if hyper.lexname() == "noun.person":
+                    return True
+            except AttributeError:
+                continue
+    return False
+
+
+def is_person_noun(lemma: str, *, lexicon: str = _DEFAULT_LEXICON) -> bool:
+    """
+    Return True if WordNet marks the noun lemma as a person-denoting concept.
+    """
+    norm = (lemma or "").strip().lower()
+    if not norm:
+        return False
+    return _is_person_noun_cached(norm, lexicon)

@@ -7,6 +7,29 @@ from .names import NameBank
 
 _PARTITIVE_HEADS = {"lot", "lots", "bunch", "number", "couple", "plenty"}
 _UPPER_SPECIAL = {"ii", "iii", "iv"}
+_ANIMATE_REFLEXIVES = {"himself", "herself", "themselves", "myself", "yourself", "yourselves", "ourselves"}
+
+
+def reflexive_subject_indices(doc):
+    """
+    Return the token indices of nominal subjects that bind an animate reflexive.
+    """
+    indices = set()
+    for pron in doc:
+        if pron.pos_ != "PRON" or pron.lower_ not in _ANIMATE_REFLEXIVES:
+            continue
+        heads = []
+        head = pron.head
+        if head is not None:
+            heads.append(head)
+            parent = head.head
+            if parent is not None and parent is not head:
+                heads.append(parent)
+        for candidate_head in heads:
+            for child in candidate_head.children:
+                if child.dep_ in {"nsubj", "nsubjpass"} and child.pos_ == "NOUN":
+                    indices.add(child.i)
+    return indices
 
 
 def _is_partitive_quantifier(token):
@@ -85,10 +108,6 @@ def _match_casing(template: str, replacement: str) -> str:
 
 
 def candidate_nouns(doc):
-    animate_reflexives = {"himself", "herself", "themselves", "myself", "yourself", "yourselves", "ourselves"}
-    animate_reflexive_present = any(
-        t.lower_ in animate_reflexives for t in doc if t.pos_ == "PRON"
-    )
     noun_chunk_indices = set()
     for chunk in doc.noun_chunks:
         for token in chunk:
@@ -107,7 +126,6 @@ def candidate_nouns(doc):
         and not _is_partitive_quantifier(t)
         and not _is_properish(t)
         and t.i in noun_chunk_indices
-        and not (animate_reflexive_present and t.dep_ in {"nsubj", "nsubjpass"})
     ]
 
 def noun_swap_all(
@@ -120,6 +138,7 @@ def noun_swap_all(
     req=None,
     rng: Optional[random.Random]=None,
     forced_targets=None,
+    rare_person_lemmas=None,
 ):
     """
     rare_lemmas: iterable[str] of candidate noun lemmas. If ``zipf_thr`` is None
@@ -131,17 +150,32 @@ def noun_swap_all(
         function swaps the tokens at the given indices (if in-range) and uses
         the supplied tag when inflecting, instead of detecting candidates from
         ``doc``.
+    rare_person_lemmas: optional iterable[str] of human-denoting rare lemmas
+        used when a swap position must stay animate (e.g., reflexive subjects).
     """
     if rng is None:
         rng = random
 
     toks = [t.text for t in doc]
     swaps = []
+    reflexive_subjects = reflexive_subject_indices(doc)
 
     if forced_targets is not None:
         seen = set()
         targets = []
-        for idx, tag in forced_targets:
+        for entry in forced_targets:
+            require_person = None
+            if isinstance(entry, dict):
+                idx = entry.get("i")
+                tag = entry.get("tag")
+                if "require_person" in entry:
+                    require_person = bool(entry.get("require_person"))
+            elif isinstance(entry, (tuple, list)):
+                if len(entry) < 2:
+                    continue
+                idx, tag = entry[0], entry[1]
+            else:
+                continue
             if not isinstance(idx, int):
                 continue
             if idx < 0 or idx >= len(doc):
@@ -150,7 +184,9 @@ def noun_swap_all(
                 continue
             token = doc[idx]
             forced_tag = tag or token.tag_
-            targets.append((token, forced_tag))
+            if require_person is None:
+                require_person = idx in reflexive_subjects
+            targets.append((token, forced_tag, bool(require_person)))
             seen.add(idx)
     else:
         detected = candidate_nouns(doc)
@@ -159,7 +195,7 @@ def noun_swap_all(
         if noun_mode == "k":
             limit = max(0, min(k, len(detected)))
             detected = detected[:limit]
-        targets = [(t, t.tag_) for t in detected]
+        targets = [(t, t.tag_, t.i in reflexive_subjects) for t in detected]
 
     if not targets:
         return None, swaps
@@ -176,6 +212,13 @@ def noun_swap_all(
     else:
         pool = [w for w in rare_lemmas if is_rare_lemma(w, zipf_thr)]
 
+    if rare_person_lemmas is None:
+        pool_person = []
+    elif zipf_thr is None:
+        pool_person = list(rare_person_lemmas)
+    else:
+        pool_person = [w for w in rare_person_lemmas if is_rare_lemma(w, zipf_thr)]
+
     def _becl_allows(lemma, suffixes, default=True):
         if not becl_map:
             return True
@@ -186,15 +229,26 @@ def noun_swap_all(
 
     if req == "COUNT":
         pool = [w for w in pool if _becl_allows(w, ("COUNT", "FLEX"), default=True)]
+        pool_person = [w for w in pool_person if _becl_allows(w, ("COUNT", "FLEX"), default=True)]
     elif req == "MASS":
         pool = [w for w in pool if _becl_allows(w, ("MASS", "FLEX"), default=False)]
+        pool_person = [w for w in pool_person if _becl_allows(w, ("MASS", "FLEX"), default=False)]
 
     if not pool:
         return None, swaps
 
+    pool_set = set(pool)
+    pool_person = [w for w in pool_person if w in pool_set]
+
+    if any(require_person for _, _, require_person in targets) and not pool_person:
+        return None, []
+
     # Choose in a deterministic sequence using rng
-    for token, tag in targets:
-        lemma = rng.choice(pool)
+    for token, tag, require_person in targets:
+        choice_pool = pool_person if require_person else pool
+        if not choice_pool:
+            return None, []
+        lemma = rng.choice(choice_pool)
         form = inflect_noun(lemma, tag)
         if not form:
             continue
