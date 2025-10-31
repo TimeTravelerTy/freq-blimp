@@ -6,12 +6,9 @@ from .quantifier import load_quant_rules, requirement
 from .edits import (
     noun_swap_all,
     candidate_nouns,
-    person_name_candidates,
-    person_name_swap,
     reflexive_subject_indices,
 )
 from .rarity import is_rare_lemma
-from .names import NameBank
 from .lemma_bank import is_person_noun
 
 
@@ -48,6 +45,20 @@ def _print_progress(done, total, start_time, last_update, width=30):
     return now
 
 
+def _noun_target_tag(token):
+    """
+    Return an NN/NNS tag that reflects the token's number features.
+    """
+    number = token.morph.get("Number")
+    if "Plur" in number:
+        return "NNS"
+    if "Sing" in number:
+        return "NN"
+    if token.tag_ in {"NN", "NNS"}:
+        return token.tag_
+    return "NNS" if token.text.lower().endswith("s") else "NN"
+
+
 def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 noun_mode="all", k=2, zipf_thr=3.4, rare_lemmas=None, seed=0,
                 show_progress=True,
@@ -62,18 +73,6 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
     qrules = load_quant_rules(quant_cfg_path)
     records = []
 
-    name_bank = None
-    rare_name_path = Path(rare_name_path) if rare_name_path else None
-    name_lookup_path = Path(name_lookup_path) if name_lookup_path else None
-    if rare_name_path and name_lookup_path:
-        try:
-            name_bank = NameBank(rare_name_path, name_lookup_path, min_lookup_confidence=name_conf)
-        except FileNotFoundError:
-            print(f"[NameBank] Skipping name swaps; missing files {rare_name_path} or {name_lookup_path}.")
-            name_bank = None
-        except ValueError as exc:
-            print(f"[NameBank] Skipping name swaps: {exc}")
-            name_bank = None
 
     if rare_lemmas:
         seen = set()
@@ -124,6 +123,11 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 # Quantifier requirement per sentence
                 req_g = requirement(gdoc, qrules)  # None/COUNT/MASS
                 req_b = requirement(bdoc, qrules)
+                if phenomenon == "quantifiers":
+                    if req_g is None and req_b in {"COUNT", "MASS"}:
+                        req_g = req_b
+                    elif req_b is None and req_g in {"COUNT", "MASS"}:
+                        req_b = req_g
 
                 # Per-pair RNG so Good/Bad use the same sequence of choices
                 pair_seed = hash((group_name, cfg, i)) & 0xFFFFFFFF
@@ -156,8 +160,16 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                     b_match = _find_match(g_tok)
                     if b_match is None:
                         continue
+                    require_person = (
+                        g_tok.i in g_reflexive_subjects
+                        and b_match.i in b_reflexive_subjects
+                    )
                     noun_matches.append(
-                        ((g_tok.i, g_tok.tag_), (b_match.i, b_match.tag_))
+                        (
+                            (g_tok.i, _noun_target_tag(g_tok)),
+                            (b_match.i, _noun_target_tag(b_match)),
+                            require_person,
+                        )
                     )
                     used_bad_indices.add(b_match.i)
 
@@ -171,99 +183,67 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 noun_changed = False
 
                 if noun_matches:
+                    needs_plural = any(
+                        g_spec[1] == "NNS" or b_spec[1] == "NNS"
+                        for g_spec, b_spec, _ in noun_matches
+                    )
+                    shared_req = req_g if req_g else req_b
+                    if needs_plural and shared_req != "MASS":
+                        shared_req = "COUNT"
                     g_target_specs = []
                     b_target_specs = []
-                    for g_spec, b_spec in noun_matches:
+                    for g_spec, b_spec, require_person in noun_matches:
                         g_idx, g_tag = g_spec
                         b_idx, b_tag = b_spec
                         g_target_specs.append({
                             "i": g_idx,
                             "tag": g_tag,
-                            "require_person": g_idx in g_reflexive_subjects,
+                            "require_person": require_person,
                         })
                         b_target_specs.append({
                             "i": b_idx,
                             "tag": b_tag,
-                            "require_person": b_idx in b_reflexive_subjects,
+                            "require_person": require_person,
                         })
                     rng = random.Random(pair_seed)
                     g_rare, g_swaps = noun_swap_all(
                         gdoc, rare_pool,
                         noun_mode=noun_mode, k=k, zipf_thr=None,
-                        becl_map=becl_map, req=req_g, rng=rng,
+                        becl_map=becl_map, req=shared_req, rng=rng,
                         forced_targets=g_target_specs,
                         rare_person_lemmas=rare_person_pool
                     )
-                    rng = random.Random(pair_seed)
-                    b_rare, b_swaps = noun_swap_all(
-                        bdoc, rare_pool,
-                        noun_mode=noun_mode, k=k, zipf_thr=None,
-                        becl_map=becl_map, req=req_b, rng=rng,
-                        forced_targets=b_target_specs,
-                        rare_person_lemmas=rare_person_pool
-                    )
-                    if (
+                    b_rare = None
+                    if g_rare and g_swaps:
+                        lemmas = [entry.get("lemma") for entry in g_swaps]
+                        if lemmas and all(lemma for lemma in lemmas):
+                            b_rare, b_swaps = noun_swap_all(
+                                bdoc, rare_pool,
+                                noun_mode=noun_mode, k=k, zipf_thr=None,
+                                becl_map=becl_map, req=shared_req,
+                                rng=random.Random(pair_seed),
+                                forced_targets=b_target_specs,
+                                rare_person_lemmas=rare_person_pool,
+                                override_lemmas=lemmas,
+                            )
+                    if not (
                         g_rare
                         and b_rare
                         and g_swaps
                         and b_swaps
                         and len(g_swaps) == len(b_swaps)
                     ):
+                        g_rare = None
+                        b_rare = None
+                        g_swaps = []
+                        b_swaps = []
+                    else:
                         g_variant = g_rare
                         b_variant = b_rare
                         noun_changed = True
 
-                # Stage 2: proper-name swaps (after noun swaps)
                 g_name_swaps, b_name_swaps = [], []
                 name_changed = False
-                if name_bank:
-                    gdoc_after = nlp(g_variant)
-                    bdoc_after = nlp(b_variant)
-                    g_name_candidates = person_name_candidates(gdoc_after, name_bank)
-                    b_name_candidates = person_name_candidates(bdoc_after, name_bank)
-
-                    if g_name_candidates or b_name_candidates:
-                        if len(g_name_candidates) == len(b_name_candidates) and g_name_candidates:
-                            used_bad = set()
-                            name_matches = []
-                            success = True
-                            for g_tok, g_gender in g_name_candidates:
-                                match = None
-                                for b_tok, b_gender in b_name_candidates:
-                                    if b_tok.i in used_bad:
-                                        continue
-                                    if b_tok.text.lower() == g_tok.text.lower() and b_gender == g_gender:
-                                        match = (b_tok.i, b_gender)
-                                        break
-                                if match is None:
-                                    success = False
-                                    break
-                                used_bad.add(match[0])
-                                name_matches.append(((g_tok.i, g_gender), match))
-                            if success and len(name_matches) == len(b_name_candidates):
-                                name_seed = (pair_seed + 0x9E3779B9) & 0xFFFFFFFF
-                                rng_names = random.Random(name_seed)
-                                g_targets = [spec for spec, _ in name_matches]
-                                b_targets = [spec for _, spec in name_matches]
-
-                                g_name_text, g_name_swaps = person_name_swap(
-                                    gdoc_after, name_bank, rng=rng_names, forced_targets=g_targets
-                                )
-                                rng_names = random.Random(name_seed)
-                                b_name_text, b_name_swaps = person_name_swap(
-                                    bdoc_after, name_bank, rng=rng_names, forced_targets=b_targets
-                                )
-                                if (
-                                    g_name_text
-                                    and b_name_text
-                                    and g_name_swaps
-                                    and b_name_swaps
-                                    and len(g_name_swaps) == len(b_name_swaps)
-                                ):
-                                    g_variant = g_name_text
-                                    b_variant = b_name_text
-                                    name_changed = True
-                        # else: mismatch in number of candidates; skip name swap
 
                 if not (noun_changed or name_changed):
                     good_rare_val = None

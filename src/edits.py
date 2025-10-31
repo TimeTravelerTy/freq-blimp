@@ -1,13 +1,43 @@
 import random
+from functools import lru_cache
 from typing import Optional
 
-from .inflect import inflect_noun
+from .inflect import (
+    inflect_noun,
+    pluralize_noun,
+    singularize_noun,
+)
 from .rarity import is_rare_lemma
 from .names import NameBank
 
 _PARTITIVE_HEADS = {"lot", "lots", "bunch", "number", "couple", "plenty"}
 _UPPER_SPECIAL = {"ii", "iii", "iv"}
 _ANIMATE_REFLEXIVES = {"himself", "herself", "themselves", "myself", "yourself", "yourselves", "ourselves"}
+_POOL_CACHE = {}
+
+_ABSTRACT_SUFFIXES = ("ness", "hood", "ship", "ism", "ity", "ment", "ance", "ence", "ency", "age", "is", "ia")
+_TAXON_SUFFIXES = ("idae", "ideae", "aceae", "ales")
+_SPECIAL_PLURALS = {
+    "men",
+    "women",
+    "people",
+    "children",
+    "teeth",
+    "feet",
+    "geese",
+    "mice",
+    "lice",
+    "oxen",
+    "indices",
+    "matrices",
+    "vertices",
+    "criteria",
+    "phenomena",
+    "data",
+    "media",
+    "dice",
+}
+_PLURAL_SUFFIXES = ("ches", "shes", "xes", "zes", "ses", "ies", "ves")
 
 
 def reflexive_subject_indices(doc):
@@ -107,6 +137,109 @@ def _match_casing(template: str, replacement: str) -> str:
     return repl.title() if template[:1].isupper() else repl.lower()
 
 
+def _plural_form_ok(plural: str, lemma: str, singular_forms: tuple[str, ...]) -> bool:
+    lower = plural.lower()
+    if lower in _SPECIAL_PLURALS:
+        return True
+    if any(lower.endswith(sfx) for sfx in _PLURAL_SUFFIXES):
+        return True
+    if lower.endswith("men"):
+        return True
+    if lower.endswith("s") and len(lower) > 3 and not lower.endswith("ss"):
+        return True
+    # Permit irregulars where the singular round-trips to the original lemma.
+    return lemma in singular_forms
+
+
+@lru_cache(maxsize=8192)
+def _is_countable_lemma(lemma: str, becl_cls: Optional[str]) -> bool:
+    if not lemma:
+        return False
+    lower = lemma.strip().lower()
+    if not lower or not lower.isalpha():
+        return False
+    if lemma != lower:
+        return False
+    if becl_cls == "MASS":
+        return False
+    if any(lower.endswith(sfx) for sfx in _TAXON_SUFFIXES):
+        return False
+    if any(lower.endswith(sfx) for sfx in _ABSTRACT_SUFFIXES):
+        return False
+
+    plural = pluralize_noun(lower)
+    if not plural or plural == lower:
+        return False
+    singular_forms = singularize_noun(plural)
+    if not singular_forms or lower not in singular_forms:
+        return False
+    if not _plural_form_ok(plural, lower, singular_forms):
+        return False
+    return True
+
+
+def _prepare_pools(
+    rare_lemmas,
+    rare_person_lemmas,
+    req,
+    zipf_thr,
+    becl_map,
+):
+    rare_tuple = rare_lemmas if isinstance(rare_lemmas, tuple) else tuple(rare_lemmas)
+    person_tuple = ()
+    if rare_person_lemmas:
+        person_tuple = rare_person_lemmas if isinstance(rare_person_lemmas, tuple) else tuple(rare_person_lemmas)
+
+    key = (
+        req,
+        rare_tuple,
+        person_tuple,
+        zipf_thr,
+        id(becl_map) if becl_map is not None else None,
+    )
+    cached = _POOL_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    if zipf_thr is None:
+        pool = list(rare_tuple)
+        pool_person = list(person_tuple)
+    else:
+        pool = [w for w in rare_tuple if is_rare_lemma(w, zipf_thr)]
+        pool_person = [w for w in person_tuple if is_rare_lemma(w, zipf_thr)]
+
+    def _becl_class(lemma: str) -> Optional[str]:
+        if not becl_map:
+            return None
+        cls = becl_map.get(lemma.lower())
+        if cls is None:
+            return None
+        return getattr(cls, "value", str(cls).split(".")[-1])
+
+    if req == "COUNT":
+        filtered = []
+        for w in pool:
+            cls = _becl_class(w)
+            if _is_countable_lemma(w, cls):
+                filtered.append(w)
+        pool = filtered
+
+        filtered_person = []
+        for w in pool_person:
+            cls = _becl_class(w)
+            if _is_countable_lemma(w, cls):
+                filtered_person.append(w)
+        pool_person = filtered_person
+    elif req == "MASS" and becl_map:
+        allowed = {"MASS", "FLEX"}
+        pool = [w for w in pool if _becl_class(w) in allowed]
+        pool_person = [w for w in pool_person if _becl_class(w) in allowed]
+
+    result = (tuple(pool), tuple(pool_person))
+    _POOL_CACHE[key] = result
+    return result
+
+
 def candidate_nouns(doc):
     noun_chunk_indices = set()
     for chunk in doc.noun_chunks:
@@ -139,6 +272,7 @@ def noun_swap_all(
     rng: Optional[random.Random]=None,
     forced_targets=None,
     rare_person_lemmas=None,
+    override_lemmas=None,
 ):
     """
     rare_lemmas: iterable[str] of candidate noun lemmas. If ``zipf_thr`` is None
@@ -152,6 +286,9 @@ def noun_swap_all(
         ``doc``.
     rare_person_lemmas: optional iterable[str] of human-denoting rare lemmas
         used when a swap position must stay animate (e.g., reflexive subjects).
+    override_lemmas: optional iterable of lemma strings to use (in target order)
+        instead of sampling from the rare pools. When provided, the function
+        ignores ``rare_lemmas`` and ``rng`` for selection.
     """
     if rng is None:
         rng = random
@@ -200,60 +337,78 @@ def noun_swap_all(
     if not targets:
         return None, swaps
 
-    if not rare_lemmas:
+    override_list = None
+    if override_lemmas is not None:
+        override_list = list(override_lemmas)
+
+    if override_list is None and not rare_lemmas:
         return None, swaps
 
     if noun_mode == "k":
         targets = targets[:max(0, min(k, len(targets)))]
 
-    # Pre-filter pool by rarity (and countability if needed)
-    if zipf_thr is None:
-        pool = list(rare_lemmas)
-    else:
-        pool = [w for w in rare_lemmas if is_rare_lemma(w, zipf_thr)]
-
-    if rare_person_lemmas is None:
-        pool_person = []
-    elif zipf_thr is None:
-        pool_person = list(rare_person_lemmas)
-    else:
-        pool_person = [w for w in rare_person_lemmas if is_rare_lemma(w, zipf_thr)]
-
-    def _becl_allows(lemma, suffixes, default=True):
-        if not becl_map:
-            return True
-        cls = becl_map.get(lemma.lower())
-        if cls is None:
-            return default
-        return str(cls).endswith(suffixes)
-
-    if req == "COUNT":
-        pool = [w for w in pool if _becl_allows(w, ("COUNT", "FLEX"), default=True)]
-        pool_person = [w for w in pool_person if _becl_allows(w, ("COUNT", "FLEX"), default=True)]
-    elif req == "MASS":
-        pool = [w for w in pool if _becl_allows(w, ("MASS", "FLEX"), default=False)]
-        pool_person = [w for w in pool_person if _becl_allows(w, ("MASS", "FLEX"), default=False)]
-
-    if not pool:
-        return None, swaps
-
-    pool_set = set(pool)
-    pool_person = [w for w in pool_person if w in pool_set]
-
-    if any(require_person for _, _, require_person in targets) and not pool_person:
-        return None, []
-
-    # Choose in a deterministic sequence using rng
-    for token, tag, require_person in targets:
-        choice_pool = pool_person if require_person else pool
-        if not choice_pool:
+    if override_list is not None:
+        if len(override_list) != len(targets):
             return None, []
-        lemma = rng.choice(choice_pool)
-        form = inflect_noun(lemma, tag)
-        if not form:
-            continue
-        toks[token.i] = form
-        swaps.append({"i": token.i, "old": token.text, "new": form, "tag": tag})
+        if not override_list:
+            return None, []
+        for (token, tag, _), lemma in zip(targets, override_list):
+            if not lemma or not isinstance(lemma, str):
+                return None, []
+            form = inflect_noun(lemma, tag)
+            if not form:
+                return None, []
+            toks[token.i] = form
+            swaps.append({
+                "i": token.i,
+                "old": token.text,
+                "new": form,
+                "tag": tag,
+                "lemma": lemma,
+            })
+    else:
+        rare_tuple = rare_lemmas if isinstance(rare_lemmas, tuple) else tuple(rare_lemmas)
+        person_tuple = ()
+        if rare_person_lemmas:
+            person_tuple = rare_person_lemmas if isinstance(rare_person_lemmas, tuple) else tuple(rare_person_lemmas)
+
+        pool, pool_person = _prepare_pools(
+            rare_tuple,
+            person_tuple,
+            req,
+            zipf_thr,
+            becl_map,
+        )
+
+        pool = list(pool)
+        pool_person = list(pool_person)
+
+        if not pool:
+            return None, swaps
+
+        pool_set = set(pool)
+        pool_person = [w for w in pool_person if w in pool_set]
+
+        if any(require_person for _, _, require_person in targets) and not pool_person:
+            return None, []
+
+        # Choose in a deterministic sequence using rng
+        for token, tag, require_person in targets:
+            choice_pool = pool_person if require_person else pool
+            if not choice_pool:
+                return None, []
+            lemma = rng.choice(choice_pool)
+            form = inflect_noun(lemma, tag)
+            if not form:
+                return None, []
+            toks[token.i] = form
+            swaps.append({
+                "i": token.i,
+                "old": token.text,
+                "new": form,
+                "tag": tag,
+                "lemma": lemma,
+            })
 
     if not swaps:
         return None, swaps
