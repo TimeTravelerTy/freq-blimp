@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Optional
 
 from .inflect import (
+    inflect_adjective,
     inflect_noun,
     pluralize_noun,
     singularize_noun,
@@ -17,6 +18,8 @@ _REFLEXIVE_GENDER = {
     "himself": "male",
 }
 _ARTICLE_DETERMINERS = {"a", "an", "the", "some"}
+_ADJ_EXCLUDE = {"many", "most", "much", "few", "several"}
+_NOUN_FALSE_FRIENDS = {"reference"}  # verbs commonly mistagged as nouns
 _POOL_CACHE = {}
 
 _ABSTRACT_SUFFIXES = ("ness", "hood", "ship", "ism", "ity", "ment", "ance", "ence", "ency", "age", "is", "ia")
@@ -120,6 +123,27 @@ def _is_properish(token):
             return True
         if not _has_preceding_article(token):
             return True
+    return False
+
+
+def _looks_like_common_plural(token) -> bool:
+    """
+    Treat capitalized irregular plurals (e.g., Oxen, Fungi) as common nouns
+    when they have a retrievable singular form.
+    """
+    if token.tag_ not in {"NNS", "NNPS"}:
+        return False
+    singulars = singularize_noun(token.text)
+    return bool(singulars)
+
+
+def _force_pluralish(token) -> bool:
+    """
+    Fallback for badly tagged plurals (e.g., 'Analyses' tagged as ADJ).
+    """
+    lower = token.text.lower()
+    if lower in _SPECIAL_PLURALS:
+        return True
     return False
 
 
@@ -278,21 +302,64 @@ def candidate_nouns(doc):
     for chunk in doc.noun_chunks:
         for token in chunk:
             noun_chunk_indices.add(token.i)
+    subject_indices = {t.i for t in doc if t.dep_ in {"nsubj", "nsubjpass"}}
     # Only content nouns; skip PROPN, NE chunks, and ROOT (prevents verb mis-swaps like "reference")
     return [
         t for t in doc
-        if t.pos_ == "NOUN"
-        and t.tag_ in {"NN", "NNS"}
+        if (
+            (t.pos_ == "NOUN" and t.tag_ in {"NN", "NNS"})
+            or (t.pos_ == "PROPN" and _looks_like_common_plural(t))
+            or _force_pluralish(t)
+        )
         and t.is_alpha
         and len(t.text) > 2
         and t.ent_type_ == ""
         and t.dep_ != "ROOT"  # skip main verb even if mis-tagged
         and t.dep_ != "relcl"
+        and t.lemma_.lower() not in _NOUN_FALSE_FRIENDS
+        and not any(child.dep_ in {"nsubj", "nsubjpass"} for child in t.children)  # avoid verb heads mis-tagged as nouns
         and not (t.head == t and t.dep_ == "ROOT")  # extra guard: skip if token is its own head and ROOT
         and not _is_partitive_quantifier(t)
-        and not _is_properish(t)
-        and t.i in noun_chunk_indices
+        and not (_is_properish(t) and not _looks_like_common_plural(t))
+        and (t.i in noun_chunk_indices or t.i in subject_indices)
     ]
+
+
+def candidate_adjectives(doc):
+    candidates = []
+    for t in doc:
+        if t.dep_ not in {"amod", "compound"}:
+            continue
+        if t.pos_ in {"DET", "PRON", "PROPN", "NUM"}:
+            continue
+        if not t.is_alpha or len(t.text) <= 2:
+            continue
+        if t.lower_ in _ADJ_EXCLUDE:
+            continue
+        if t.i == 0 and t.text and t.text[0].isupper() and t.lemma_ == t.text:
+            continue
+        if t.ent_type_:
+            continue
+        head = t.head
+        if head is None or head.pos_ != "NOUN":
+            continue
+        if head.dep_ == "ROOT":
+            # Skip when the whole clause is misparsed as a noun headed phrase.
+            continue
+        if head.tag_ not in {"NN", "NNS"}:
+            continue
+        if abs(head.i - t.i) > 2:
+            continue
+        candidates.append(t)
+    return candidates
+
+
+def _normalize_adj_tag(tag: str) -> str:
+    if not tag:
+        return "JJ"
+    if tag.startswith("JJ"):
+        return tag
+    return "JJ"
 
 def noun_swap_all(
     doc,
@@ -489,6 +556,128 @@ def noun_swap_all(
     _adjust_indefinite_articles(toks)
     text = _detokenize(toks)
     # Capitalize the first character of the sentence
+    if text:
+        text = text[0].upper() + text[1:]
+    return text, swaps
+
+
+def _prepare_adj_pool(rare_lemmas, zipf_thr):
+    rare_tuple = rare_lemmas if isinstance(rare_lemmas, tuple) else tuple(rare_lemmas)
+    if zipf_thr is None:
+        return rare_tuple
+    return tuple(w for w in rare_tuple if is_rare_lemma(w, zipf_thr))
+
+
+def adjective_swap_all(
+    doc,
+    rare_lemmas,
+    adj_mode="all",
+    k=2,
+    zipf_thr=3.4,
+    rng: Optional[random.Random]=None,
+    forced_targets=None,
+    override_lemmas=None,
+):
+    """
+    Swap attributive adjectives with rare lemmas.
+    """
+    if rng is None:
+        rng = random
+
+    toks = [t.text for t in doc]
+    swaps = []
+
+    if forced_targets is not None:
+        seen = set()
+        targets = []
+        for entry in forced_targets:
+            if isinstance(entry, dict):
+                idx = entry.get("i")
+                tag = _normalize_adj_tag(entry.get("tag"))
+            elif isinstance(entry, (tuple, list)) and len(entry) >= 2:
+                idx, tag = entry[0], entry[1]
+                tag = _normalize_adj_tag(tag)
+            else:
+                continue
+            if not isinstance(idx, int) or idx < 0 or idx >= len(doc):
+                continue
+            if idx in seen:
+                continue
+            token = doc[idx]
+            targets.append((token, tag or token.tag_))
+            seen.add(idx)
+    else:
+        detected = candidate_adjectives(doc)
+        detected.sort(key=lambda t: t.i)
+        if adj_mode == "k":
+            limit = max(0, min(k, len(detected)))
+            detected = detected[:limit]
+        targets = [(t, _normalize_adj_tag(t.tag_)) for t in detected]
+
+    if not targets:
+        return None, swaps
+
+    override_list = None
+    if override_lemmas is not None:
+        override_list = list(override_lemmas)
+
+    if override_list is None and not rare_lemmas:
+        return None, swaps
+
+    if adj_mode == "k":
+        targets = targets[:max(0, min(k, len(targets)))]
+
+    if override_list is not None:
+        if len(override_list) != len(targets):
+            return None, []
+        if not override_list:
+            return None, []
+        for (token, tag), lemma in zip(targets, override_list):
+            if not lemma or not isinstance(lemma, str):
+                return None, []
+            form = inflect_adjective(lemma, tag)
+            if not form:
+                return None, []
+            toks[token.i] = _match_casing(token.text, form)
+            swaps.append({
+                "i": token.i,
+                "old": token.text,
+                "new": toks[token.i],
+                "tag": tag,
+                "lemma": lemma,
+            })
+    else:
+        pool = list(_prepare_adj_pool(rare_lemmas, zipf_thr))
+        if not pool:
+            return None, swaps
+        for token, tag in targets:
+            # Try a deterministic random order until we find an inflectable lemma.
+            pool_order = list(pool)
+            rng.shuffle(pool_order)
+            chosen = None
+            for lemma in pool_order:
+                form = inflect_adjective(lemma, tag)
+                if form:
+                    chosen = (lemma, form)
+                    break
+            if not chosen:
+                # Skip this target if no inflectable form; keep others.
+                continue
+            lemma, form = chosen
+            toks[token.i] = _match_casing(token.text, form)
+            swaps.append({
+                "i": token.i,
+                "old": token.text,
+                "new": toks[token.i],
+                "tag": tag,
+                "lemma": lemma,
+            })
+
+    if not swaps:
+        return None, swaps
+
+    _adjust_indefinite_articles(toks)
+    text = _detokenize(toks)
     if text:
         text = text[0].upper() + text[1:]
     return text, swaps

@@ -114,7 +114,8 @@ def oewn_lemmas(
     return lemmas
 
 
-def sample_rare_nouns_from_oewn(
+def sample_rare_lemmas_from_oewn(
+    pos: str = "n",
     zipf_max: float = 3.4,
     *,
     zipf_min: Optional[float] = None,
@@ -123,10 +124,13 @@ def sample_rare_nouns_from_oewn(
     limit: Optional[int] = None,
 ) -> List[str]:
     """
-    Collect rare noun lemmas from OEWN filtered by Zipf frequency.
+    Collect rare lemmas from OEWN filtered by Zipf frequency.
 
     Parameters
     ----------
+    pos:
+        Part-of-speech for the lemmas (e.g., ``"n"`` for nouns, ``"a"`` for
+        adjectives). The value is normalized via the POS aliases.
     zipf_max:
         Upper bound on `wordfreq.zipf_frequency` (exclusive).
     zipf_min:
@@ -138,9 +142,10 @@ def sample_rare_nouns_from_oewn(
     limit:
         Optional maximum number of lemmas to return (deterministic prefix).
     """
-    nouns = oewn_lemmas("n", lexicon=lexicon)
+    pos_code = _normalize_pos(pos)
+    lemmas_source = oewn_lemmas(pos_code, lexicon=lexicon)
     rare: List[str] = []
-    for lemma in nouns:
+    for lemma in lemmas_source:
         if not _should_keep(lemma, min_len=min_length):
             continue
         score = zipf_frequency(lemma, "en")
@@ -152,6 +157,48 @@ def sample_rare_nouns_from_oewn(
     if limit is not None:
         rare = rare[:max(0, limit)]
     return rare
+
+
+def sample_rare_nouns_from_oewn(
+    zipf_max: float = 3.4,
+    *,
+    zipf_min: Optional[float] = None,
+    min_length: int = 3,
+    lexicon: str = _DEFAULT_LEXICON,
+    limit: Optional[int] = None,
+) -> List[str]:
+    """
+    Backwards-compatible wrapper for sampling rare noun lemmas.
+    """
+    return sample_rare_lemmas_from_oewn(
+        "n",
+        zipf_max=zipf_max,
+        zipf_min=zipf_min,
+        min_length=min_length,
+        lexicon=lexicon,
+        limit=limit,
+    )
+
+
+def sample_rare_adjectives_from_oewn(
+    zipf_max: float = 3.4,
+    *,
+    zipf_min: Optional[float] = None,
+    min_length: int = 3,
+    lexicon: str = _DEFAULT_LEXICON,
+    limit: Optional[int] = None,
+) -> List[str]:
+    """
+    Convenience wrapper for sampling rare adjective lemmas.
+    """
+    return sample_rare_lemmas_from_oewn(
+        "a",
+        zipf_max=zipf_max,
+        zipf_min=zipf_min,
+        min_length=min_length,
+        lexicon=lexicon,
+        limit=limit,
+    )
 
 
 @lru_cache(maxsize=4096)

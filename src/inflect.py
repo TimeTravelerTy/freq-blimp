@@ -113,6 +113,18 @@ def inflect_noun(lemma, tag):
     return form
 
 
+def inflect_adjective(lemma: str, tag: str):
+    """
+    Inflect an adjective lemma for the desired POS tag (JJ/JJR/JJS).
+    """
+    if not lemma:
+        return None
+    out = getInflection(lemma, tag=tag)
+    if not out:
+        return None
+    return out[0]
+
+
 @lru_cache(maxsize=4096)
 def pluralize_noun(lemma: str) -> Optional[str]:
     """Return a lower-cased plural form for the given lemma, if possible."""
