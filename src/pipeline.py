@@ -164,6 +164,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 gender_lexicon_path="data/processed/wiktionary_gender_lemmas.json",
                 verb_inventory_path=None,
                 verb_inventory=None,
+                zipf_weighted_sampling: bool = False,
+                zipf_temp: float = 1.0,
                 spacy_n_process: int = 1,
                 spacy_batch_size: int = 128):
     nlp = spacy.load("en_core_web_sm")
@@ -374,6 +376,9 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                             verb_inventory_obj,
                             verb_mode=verb_mode,
                             k=k,
+                            zipf_thr=verb_zipf_thr,
+                            zipf_weighted=zipf_weighted_sampling,
+                            zipf_temp=zipf_temp,
                             rng=rng_verbs,
                             forced_targets=g_target_specs,
                         )
@@ -388,15 +393,18 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     break
                                 override_specs.append({"lemma": lemma, "frame": frame_name})
                             if override_specs and len(override_specs) == len(b_target_specs):
-                                b_verb_variant, b_verb_swaps = verb_swap_all(
-                                    bdoc_working,
-                                    verb_inventory_obj,
-                                    verb_mode=verb_mode,
-                                    k=k,
-                                    rng=random.Random(pair_seed - 1),
-                                    forced_targets=b_target_specs,
-                                    override_specs=override_specs,
-                                )
+                                    b_verb_variant, b_verb_swaps = verb_swap_all(
+                                        bdoc_working,
+                                        verb_inventory_obj,
+                                        verb_mode=verb_mode,
+                                        k=k,
+                                        zipf_thr=verb_zipf_thr,
+                                        zipf_weighted=zipf_weighted_sampling,
+                                        zipf_temp=zipf_temp,
+                                        rng=random.Random(pair_seed - 1),
+                                        forced_targets=b_target_specs,
+                                        override_specs=override_specs,
+                                    )
                         if not (
                             g_verb_variant
                             and b_verb_variant
@@ -496,6 +504,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                         g_rare, g_swaps = noun_swap_all(
                             gdoc_working, rare_pool,
                             noun_mode=noun_mode, k=k, zipf_thr=None,
+                            zipf_weighted=zipf_weighted_sampling,
+                            zipf_temp=zipf_temp,
                             becl_map=becl_map, req=shared_req, rng=rng,
                             forced_targets=g_target_specs,
                             rare_person_lemmas=rare_person_pool,
@@ -509,6 +519,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 b_rare, b_swaps = noun_swap_all(
                                     bdoc_working, rare_pool,
                                     noun_mode=noun_mode, k=k, zipf_thr=None,
+                                    zipf_weighted=zipf_weighted_sampling,
+                                    zipf_temp=zipf_temp,
                                     becl_map=becl_map, req=shared_req,
                                     rng=random.Random(pair_seed),
                                     forced_targets=b_target_specs,
@@ -591,6 +603,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                             adj_mode=adj_mode,
                             k=k,
                             zipf_thr=adj_zipf_thr,
+                            zipf_weighted=zipf_weighted_sampling,
+                            zipf_temp=zipf_temp,
                             rng=rng_adj,
                             forced_targets=g_target_specs,
                         )
@@ -598,16 +612,18 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                         if g_adj_variant and g_adj_swaps:
                             adj_lemmas = [entry.get("lemma") for entry in g_adj_swaps]
                             if adj_lemmas and all(lemma for lemma in adj_lemmas):
-                                b_adj_variant, b_adj_swaps = adjective_swap_all(
-                                    bdoc_adj,
-                                    rare_adj_pool,
-                                    adj_mode=adj_mode,
-                                    k=k,
-                                    zipf_thr=adj_zipf_thr,
-                                    rng=random.Random(pair_seed + 1),
-                                    forced_targets=b_target_specs,
-                                    override_lemmas=adj_lemmas,
-                                )
+                                    b_adj_variant, b_adj_swaps = adjective_swap_all(
+                                        bdoc_adj,
+                                        rare_adj_pool,
+                                        adj_mode=adj_mode,
+                                        k=k,
+                                        zipf_thr=adj_zipf_thr,
+                                        zipf_weighted=zipf_weighted_sampling,
+                                        zipf_temp=zipf_temp,
+                                        rng=random.Random(pair_seed + 1),
+                                        forced_targets=b_target_specs,
+                                        override_lemmas=adj_lemmas,
+                                    )
                         if not (
                             g_adj_variant
                             and b_adj_variant

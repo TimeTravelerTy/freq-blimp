@@ -24,6 +24,7 @@ data/processed/
 data/external/
 data/raw/
 results/
+.cache/
 
 # OS
 .DS_Store

@@ -5,10 +5,19 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import wn
+from wordfreq import zipf_frequency
 
 from .lemma_bank import sample_rare_verbs_from_oewn
 from .rarity import is_rare_lemma
 import xml.etree.ElementTree as ET
+
+
+@lru_cache(maxsize=8192)
+def _zipf_freq_cached(lemma: str) -> float:
+    try:
+        return zipf_frequency(lemma or "", "en")
+    except Exception:
+        return 0.0
 
 
 _SUPPORTED_FRAME_TYPES = {
@@ -160,6 +169,8 @@ class VerbInventory:
         *,
         desired_prep: Optional[str] = None,
         desired_particle: Optional[str] = None,
+        zipf_weighted: bool = False,
+        zipf_temp: float = 1.0,
     ) -> Optional[Tuple[VerbEntry, VerbFrameSpec]]:
         choices = self.choices_for_frame(kind)
         if not choices:
@@ -173,7 +184,14 @@ class VerbInventory:
             return None
         if filtered:
             choices = filtered
-        return rng.choice(choices)
+        if not zipf_weighted or len(choices) == 1:
+            return rng.choice(choices)
+        weights = []
+        for entry, _frame in choices:
+            freq = 10 ** _zipf_freq_cached(entry.lemma)
+            adj = freq ** (1.0 / zipf_temp) if zipf_temp and zipf_temp > 0 else freq
+            weights.append(adj if adj > 0 else 0.001)
+        return rng.choices(choices, weights=weights, k=1)[0]
 
     def lookup(self, lemma: str, kind: str) -> Optional[Tuple[VerbEntry, VerbFrameSpec]]:
         lemma_norm = (lemma or "").strip().lower()

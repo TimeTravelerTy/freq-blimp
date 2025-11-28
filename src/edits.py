@@ -2,6 +2,7 @@ import random
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, List, Optional
+from wordfreq import zipf_frequency
 
 from .inflect import (
     inflect_adjective,
@@ -11,7 +12,6 @@ from .inflect import (
     singularize_noun,
 )
 from .rarity import is_rare_lemma
-from .lemma_bank import is_person_noun
 from .verb_inventory import VerbInventory
 
 _PARTITIVE_HEADS = {"lot", "lots", "bunch", "number", "couple", "plenty"}
@@ -24,8 +24,8 @@ _REFLEXIVE_GENDER = {
 }
 _ARTICLE_DETERMINERS = {"a", "an", "the", "some"}
 _ADJ_EXCLUDE = {"many", "most", "much", "few", "several"}
-_NOUN_FALSE_FRIENDS = {"reference"}  # verbs commonly mistagged as nouns
 _POOL_CACHE = {}
+_WEIGHT_CACHE = {}
 
 _ABSTRACT_SUFFIXES = ("ness", "hood", "ship", "ism", "ity", "ment", "ance", "ence", "ency", "age", "is", "ia", "ry")
 _TAXON_SUFFIXES = ("idae", "ideae", "aceae", "ales")
@@ -49,7 +49,6 @@ _SPECIAL_PLURALS = {
     "media",
     "dice",
     "cacti",
-    "octopi",
     "alumni",
 }
 _PLURAL_SUFFIXES = ("ches", "shes", "xes", "zes", "ses", "ies", "ves")
@@ -59,22 +58,172 @@ _OBJ_DEPS = {"dobj", "obj"}
 _IOBJ_DEPS = {"iobj", "dative"}
 _PREP_DEPS = {"prep"}
 _PARTICLE_DEPS = {"prt"}
-_RARE_THAT_VERBS = (
+_THAT_VERBS = (
+    "accept",
+    "acknowledge",
+    "add",
+    "admit",
+    "advert",
+    "affirm",
+    "agree",
+    "allege",
+    "allow",
+    "announce",
+    "answer",
+    "anticipate",
+    "apprehend",
+    "argue",
+    "ascertain",
+    "assert",
+    "assever",
     "asseverate",
+    "assume",
+    "attest",
+    "aver",
     "avouch",
     "avow",
-    "aver",
-    "attest",
-    "depose",
-    "intimate",
-    "profess",
-    "surmise",
+    "believe",
+    "betray",
+    "boast",
+    "bruit",
+    "calculate",
+    "certify",
+    "claim",
+    "comment",
+    "complain",
+    "concede",
+    "conceive",
+    "conclude",
+    "confess",
+    "confirm",
     "conjecture",
-    "speculate",
-    "postulate",
-    "posit",
+    "consider",
+    "contend",
+    "decide",
+    "declare",
+    "deduce",
+    "demonstrate",
+    "deny",
+    "depose",
+    "determine",
+    "discern",
+    "disclose",
+    "discover",
+    "divine",
+    "divulge",
+    "doubt",
+    "dream",
+    "emphasize",
+    "ensure",
+    "establish",
+    "estimate",
+    "expect",
+    "explain",
+    "extrapolate",
+    "fancy",
+    "fear",
+    "feel",
+    "figure",
+    "find",
+    "foresee",
+    "forget",
+    "gainsay",
+    "gather",
+    "grant",
+    "guarantee",
+    "guess",
+    "hear",
+    "hold",
+    "hope",
+    "hypothesize",
+    "imagine",
+    "imply",
+    "indicate",
+    "infer",
+    "insist",
+    "intimate",
+    "judge",
+    "know",
+    "learn",
+    "maintain",
+    "mean",
+    "mention",
+    "note",
+    "notice",
+    "observe",
     "opine",
-    "assever",
+    "perceive",
+    "pledge",
+    "portend",
+    "posit",
+    "postulate",
+    "predict",
+    "presage",
+    "presume",
+    "presuppose",
+    "pretend",
+    "proclaim",
+    "profess",
+    "prognosticate",
+    "promise",
+    "pronounce",
+    "propose",
+    "propound",
+    "prove",
+    "provide",
+    "purport",
+    "ratiocinate",
+    "read",
+    "realize",
+    "reason",
+    "recall",
+    "reckon",
+    "recognize",
+    "record",
+    "reflect",
+    "remark",
+    "remember",
+    "repeat",
+    "reply",
+    "report",
+    "request",
+    "require",
+    "resolve",
+    "respond",
+    "reveal",
+    "rule",
+    "say",
+    "see",
+    "sense",
+    "show",
+    "signify",
+    "speculate",
+    "state",
+    "stipulate",
+    "submit",
+    "suggest",
+    "suppose",
+    "surmise",
+    "suspect",
+    "swear",
+    "teach",
+    "testify",
+    "theorize",
+    "think",
+    "threaten",
+    "trust",
+    "understand",
+    "urge",
+    "verify",
+    "vouch",
+    "vouchsafe",
+    "vow",
+    "warn",
+    "warrant",
+    "whisper",
+    "wish",
+    "worry",
+    "write",
 )
 
 # Allow compatible frame backoffs when exact matching fails.
@@ -84,6 +233,66 @@ _FRAME_FAMILY = {
     "intr_particle": ["trans_particle"],
     "trans_pp": ["intr_pp"],         # sometimes inventory marks PP complements as intransitive
 }
+
+@lru_cache(maxsize=8192)
+def _zipf_freq_cached(lemma: str) -> float:
+    try:
+        return zipf_frequency(lemma or "", "en")
+    except Exception:
+        return 0.0
+
+
+def _zipf_weights(pool: List[str], temp: float = 1.0) -> List[float]:
+    if not pool:
+        return []
+    lemmas = tuple(pool)
+    key = (lemmas, float(temp))
+    cached = _WEIGHT_CACHE.get(key)
+    if cached is not None:
+        return list(cached)
+    weights = []
+    for lemma in lemmas:
+        freq = 10 ** _zipf_freq_cached(lemma)
+        adj = freq ** (1.0 / temp) if temp and temp > 0 else freq
+        weights.append(adj if adj > 0 else 0.001)
+    _WEIGHT_CACHE[key] = tuple(weights)
+    return weights
+
+
+def _weighted_choice_by_zipf(pool: List[str], rng: random.Random, temp: float = 1.0) -> str:
+    """
+    Prefer lemmas closer to the Zipf ceiling while keeping randomness.
+    """
+    if len(pool) == 1:
+        return pool[0]
+    weights = _zipf_weights(pool, temp=temp)
+    return rng.choices(pool, weights=weights, k=1)[0]
+
+
+def _weighted_order_by_zipf(pool: List[str], rng: random.Random, max_draws: int = 64, temp: float = 1.0) -> List[str]:
+    """
+    Return a de-duplicated order biased toward higher Zipf frequencies.
+    Draws are capped to avoid O(N) shuffles on huge pools.
+    """
+    if len(pool) <= 1:
+        return list(pool)
+    weights = _zipf_weights(pool, temp=temp)
+    draws = min(len(pool), max_draws)
+    sample = rng.choices(pool, weights=weights, k=draws)
+    seen = set()
+    ordered = []
+    for lemma in sample:
+        if lemma in seen:
+            continue
+        seen.add(lemma)
+        ordered.append(lemma)
+    if draws < len(pool):
+        return ordered
+    if len(ordered) < len(pool):
+        for lemma in pool:
+            if lemma not in seen:
+                ordered.append(lemma)
+    return ordered
 
 def reflexive_subject_indices(doc):
     """
@@ -356,8 +565,6 @@ def candidate_nouns(doc, reflexive_subjects=None):
             continue
         if t.dep_ == "ROOT" or t.dep_ == "relcl":
             continue
-        if t.lemma_.lower() in _NOUN_FALSE_FRIENDS:
-            continue
         # Avoid verb heads mis-tagged as nouns
         if any(child.dep_ in {"nsubj", "nsubjpass"} for child in t.children):
             continue
@@ -505,6 +712,8 @@ def noun_swap_all(
     noun_mode="all",
     k=2,
     zipf_thr=3.4,
+    zipf_weighted: bool = False,
+    zipf_temp: float = 1.0,
     becl_map=None,
     req=None,
     rng: Optional[random.Random]=None,
@@ -679,7 +888,7 @@ def noun_swap_all(
                 choice_pool = pool_non_person_checked
             if not choice_pool:
                 return None, []
-            lemma = rng.choice(choice_pool)
+            lemma = _weighted_choice_by_zipf(choice_pool, rng, temp=zipf_temp) if zipf_weighted else rng.choice(choice_pool)
             form = inflect_noun(lemma, tag)
             if not form:
                 return None, []
@@ -716,6 +925,8 @@ def adjective_swap_all(
     adj_mode="all",
     k=2,
     zipf_thr=3.4,
+    zipf_weighted: bool = False,
+    zipf_temp: float = 1.0,
     rng: Optional[random.Random]=None,
     forced_targets=None,
     override_lemmas=None,
@@ -793,9 +1004,12 @@ def adjective_swap_all(
         if not pool:
             return None, swaps
         for token, tag in targets:
-            # Try a deterministic random order until we find an inflectable lemma.
-            pool_order = list(pool)
-            rng.shuffle(pool_order)
+            # Try a deterministic order until we find an inflectable lemma.
+            pool_order = (
+                _weighted_order_by_zipf(pool, rng, temp=zipf_temp) if zipf_weighted else list(pool)
+            )
+            if not zipf_weighted:
+                rng.shuffle(pool_order)
             chosen = None
             for lemma in pool_order:
                 form = inflect_adjective(lemma, tag)
@@ -890,12 +1104,19 @@ def verb_swap_all(
     inventory: Optional[VerbInventory],
     verb_mode: str = "k",
     k: int = 1,
+    zipf_thr: Optional[float] = None,
+    zipf_weighted: bool = False,
+    zipf_temp: float = 1.0,
     rng: Optional[random.Random] = None,
     forced_targets=None,
     override_specs=None,
 ):
     """
     Swap lexical verbs using the precomputed verb inventory.
+
+    ``zipf_thr`` filters optional that-clause replacements for rarity.
+    When ``zipf_weighted`` is True, sampling prefers higher Zipf lemmas
+    within the allowed pools.
     """
     if rng is None:
         rng = random
@@ -930,8 +1151,18 @@ def verb_swap_all(
             spec = override_list[idx] if override_list is not None else None
             forced_lemma = spec.get("lemma") if isinstance(spec, dict) else None
             forced_frame = spec.get("frame") if isinstance(spec, dict) else None
-            options = [forced_lemma] if forced_lemma else list(_RARE_THAT_VERBS)
-            rng.shuffle(options)
+            if forced_lemma:
+                options = [forced_lemma]
+            else:
+                options = list(_THAT_VERBS)
+                if zipf_thr is not None:
+                    filtered = [lemma for lemma in options if is_rare_lemma(lemma, zipf_thr)]
+                    if filtered:
+                        options = filtered
+            if zipf_weighted:
+                options = _weighted_order_by_zipf(options, rng, temp=zipf_temp)
+            else:
+                rng.shuffle(options)
             chosen_lemma = None
             chosen_form = None
             for lemma in options:
@@ -980,9 +1211,11 @@ def verb_swap_all(
                     rng,
                     desired_prep=prep_text,
                     desired_particle=particle_text,
+                    zipf_weighted=zipf_weighted,
+                    zipf_temp=zipf_temp,
                 )
                 if not sample and (prep_text or particle_text):
-                    sample = inventory.sample(fk, rng)
+                    sample = inventory.sample(fk, rng, zipf_weighted=zipf_weighted, zipf_temp=zipf_temp)
                 if sample:
                     break
             if not sample:
