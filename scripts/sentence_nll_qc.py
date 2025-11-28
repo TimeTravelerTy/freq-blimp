@@ -1,11 +1,12 @@
 import argparse
+import hashlib
 import json
 import os
 import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.sentence_nll import LlamaNLLScorer  # noqa: E402
@@ -200,6 +201,67 @@ def _save_json(path: Optional[str], obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def _model_slug(model: str) -> str:
+    return model.split("/")[-1].replace(".", "_")
+
+
+def _typical_cache_path(model: str) -> Path:
+    return Path("results") / "sentence_nll_runs" / "cache" / f"{_model_slug(model)}_typical.json"
+
+
+def _typical_fingerprint(items: List[dict]) -> str:
+    typical = [it for it in items if it.get("variant") in ("good_typical", "bad_typical")]
+    typical.sort(key=lambda it: (it.get("row"), it.get("variant")))
+    payload = "\n".join(f"{it.get('row')}|{it.get('variant')}|{it.get('text')}" for it in typical)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _load_typical_cache(model: str, fingerprint: str) -> Dict[Tuple[int, str], dict]:
+    path = _typical_cache_path(model)
+    if not path.exists():
+        return {}
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if data.get("fingerprint") != fingerprint:
+        return {}
+    cached = {}
+    for entry in data.get("scores", []):
+        key = (entry.get("row"), entry.get("variant"))
+        if key[0] is None or key[1] is None:
+            continue
+        cached[key] = {
+            "total_nll": entry.get("total_nll"),
+            "token_count": entry.get("token_count"),
+            "nll_per_char": entry.get("nll_per_char"),
+            "char_len": entry.get("char_len"),
+        }
+    return cached
+
+
+def _save_typical_cache(model: str, fingerprint: str, items: List[dict]) -> None:
+    path = _typical_cache_path(model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    typical = [
+        {
+            "row": it.get("row"),
+            "variant": it.get("variant"),
+            "text": it.get("text"),
+            "total_nll": it.get("total_nll"),
+            "token_count": it.get("token_count"),
+            "nll_per_char": it.get("nll_per_char"),
+            "char_len": it.get("char_len", len(it.get("text") or "")),
+        }
+        for it in items
+        if it.get("variant") in ("good_typical", "bad_typical")
+    ]
+    payload = {"fingerprint": fingerprint, "scores": typical}
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", default="data/processed/pilot_tierA.jsonl")
@@ -227,6 +289,9 @@ def main():
     items = _build_items(records)
     print(f"Scoring {len(items)} variants across {len(VARIANTS)} buckets...")
 
+    fingerprint = _typical_fingerprint(items)
+    typical_cache = _load_typical_cache(args.model, fingerprint)
+
     scorer = LlamaNLLScorer(
         model_name=args.model,
         device=args.device,
@@ -234,20 +299,49 @@ def main():
         device_map=args.device_map,
         compile_model=args.compile,
     )
-    scores = scorer.score_texts(
-        [item["text"] for item in items],
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-    )
-    for item, score in zip(items, scores):
-        char_len = max(1, item.get("char_len", len(item.get("text", "")) or 0))
-        item.update(
-            {
-                "total_nll": score.total_nll,
-                "token_count": score.token_count,
-                "nll_per_char": score.total_nll / char_len,
-            }
+    missing_indices = []
+    missing_texts = []
+    for idx, item in enumerate(items):
+        key = (item.get("row"), item.get("variant"))
+        cached = typical_cache.get(key)
+        if cached:
+            char_len = max(1, item.get("char_len", len(item.get("text", "")) or 0))
+            total_nll = cached.get("total_nll")
+            token_count = cached.get("token_count")
+            if total_nll is None or token_count is None:
+                # If cache is incomplete, fall back to scoring.
+                missing_indices.append(idx)
+                missing_texts.append(item["text"])
+                continue
+            item.update(
+                {
+                    "total_nll": total_nll,
+                    "token_count": token_count,
+                    "nll_per_char": total_nll / char_len,
+                }
+            )
+        else:
+            missing_indices.append(idx)
+            missing_texts.append(item["text"])
+
+    if missing_texts:
+        scores = scorer.score_texts(
+            missing_texts,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
         )
+        for (idx, item_text), score in zip(zip(missing_indices, missing_texts), scores):
+            item = items[idx]
+            char_len = max(1, item.get("char_len", len(item.get("text", "")) or 0))
+            item.update(
+                {
+                    "total_nll": score.total_nll,
+                    "token_count": score.token_count,
+                    "nll_per_char": score.total_nll / char_len,
+                }
+            )
+
+    _save_typical_cache(args.model, fingerprint, items)
 
     per_record: Dict[int, Dict[Variant, dict]] = defaultdict(dict)
     for item in items:

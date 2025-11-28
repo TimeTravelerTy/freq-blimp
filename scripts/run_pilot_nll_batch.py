@@ -10,10 +10,13 @@ from sentence_nll_qc import (
     _aggregate_by_variant,
     _build_items,
     _good_bad_stats,
+    _load_typical_cache,
     _pairwise_stats,
     _rare_penalty_stats,
     _save_single_json,
+    _save_typical_cache,
     _subtask_deltas,
+    _typical_fingerprint,
     load_records,
 )
 
@@ -44,20 +47,51 @@ def _score_dataset(
         raise RuntimeError(f"No records loaded from {data_path}")
     items = _build_items(records)
 
-    scores = scorer.score_texts(
-        [item["text"] for item in items],
-        batch_size=batch_size,
-        max_length=max_length,
-    )
-    for item, score in zip(items, scores):
-        char_len = max(1, item.get("char_len", len(item.get("text", "")) or 0))
-        item.update(
-            {
-                "total_nll": score.total_nll,
-                "token_count": score.token_count,
-                "nll_per_char": score.total_nll / char_len,
-            }
+    fingerprint = _typical_fingerprint(items)
+    typical_cache = _load_typical_cache(model, fingerprint)
+
+    missing_indices = []
+    missing_texts = []
+    for idx, item in enumerate(items):
+        key = (item.get("row"), item.get("variant"))
+        cached = typical_cache.get(key)
+        if cached:
+            char_len = max(1, item.get("char_len", len(item.get("text", "")) or 0))
+            total_nll = cached.get("total_nll")
+            token_count = cached.get("token_count")
+            if total_nll is None or token_count is None:
+                missing_indices.append(idx)
+                missing_texts.append(item["text"])
+                continue
+            item.update(
+                {
+                    "total_nll": total_nll,
+                    "token_count": token_count,
+                    "nll_per_char": total_nll / char_len,
+                }
+            )
+        else:
+            missing_indices.append(idx)
+            missing_texts.append(item["text"])
+
+    if missing_texts:
+        scores = scorer.score_texts(
+            missing_texts,
+            batch_size=batch_size,
+            max_length=max_length,
         )
+        for (idx, _), score in zip(zip(missing_indices, missing_texts), scores):
+            item = items[idx]
+            char_len = max(1, item.get("char_len", len(item.get("text", "")) or 0))
+            item.update(
+                {
+                    "total_nll": score.total_nll,
+                    "token_count": score.token_count,
+                    "nll_per_char": score.total_nll / char_len,
+                }
+            )
+
+    _save_typical_cache(model, fingerprint, items)
 
     per_record = {}
     for item in items:
