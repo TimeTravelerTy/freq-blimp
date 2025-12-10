@@ -25,10 +25,7 @@ _SUPPORTED_FRAME_TYPES = {
     "trans",
     "ditrans",
     "intr_pp",
-    "trans_pp",
     "ditrans_pp",
-    "intr_particle",
-    "trans_particle",
 }
 
 _PREP_KEYWORDS = (
@@ -66,13 +63,26 @@ def _safe_lower(text: Optional[str]) -> Optional[str]:
     return text.lower() if isinstance(text, str) else None
 
 
+def _is_transitive_like(kind: Optional[str]) -> bool:
+    if not kind:
+        return False
+    return kind.startswith("trans") or kind.startswith("ditrans")
+
+
+def _entry_has_transitive_like(entry: "VerbEntry") -> bool:
+    for frame in entry.frames:
+        if _is_transitive_like(frame.kind):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class VerbFrameSpec:
     """
     Normalized representation of the structures a verb lemma can license.
 
     kind:
-        Frame identifier, e.g., ``intr`` or ``trans_particle``.
+        Frame identifier, e.g., ``intr`` or ``ditrans_pp``.
     prep:
         Optional preposition string for *_pp frames. When ``None`` the swapper
         keeps the original preposition text found in the sentence.
@@ -134,6 +144,7 @@ class VerbInventory:
         desired_prep: Optional[str] = None,
         desired_particle: Optional[str] = None,
     ) -> Optional[Sequence[Tuple[VerbEntry, VerbFrameSpec]]]:
+        desired_prep_lower = desired_prep.lower() if desired_prep else None
         filtered = [
             (entry, frame)
             for entry, frame in choices
@@ -222,13 +233,41 @@ def _parse_frame(entry: Dict) -> Optional[VerbFrameSpec]:
     if raw_kind not in _SUPPORTED_FRAME_TYPES:
         return None
     prep = entry.get("prep")
-    particle = entry.get("particle")
-    separable = bool(entry.get("separable"))
     if raw_kind.endswith("_pp") and prep is None:
         prep = entry.get("preposition")
-    if raw_kind.endswith("_particle") and particle is None:
-        particle = entry.get("part")
-    return VerbFrameSpec(kind=raw_kind, prep=prep, particle=particle, separable=separable)
+    return VerbFrameSpec(kind=raw_kind, prep=prep, particle=None, separable=False)
+
+
+def _filter_transitivity_with_wordnet(
+    lemma: str,
+    frames: List[VerbFrameSpec],
+    lexicon: Optional[str],
+) -> List[VerbFrameSpec]:
+    """
+    Use WordNet frames as a veto to drop VerbNet-only transitive/ditransitive frames.
+
+    If WordNet lacks any direct-object frames for the lemma, we remove trans*/ditrans*
+    VerbNet frames but keep intr/PP frames. When VerbNet would be emptied by this
+    pruning, we fall back to the WordNet frames so the lemma remains available for
+    intransitive swaps.
+    """
+    if not lexicon:
+        return frames
+
+    wn_frames = _lemma_frames(lemma, lexicon)
+    if not wn_frames:
+        return frames
+
+    has_transitive = any(_is_transitive_like(spec.kind) for spec in wn_frames)
+    if has_transitive:
+        return frames
+
+    filtered = [frame for frame in frames if not _is_transitive_like(frame.kind)]
+    if filtered:
+        return filtered
+
+    # If VerbNet only contributed transitive frames, keep the WordNet view instead.
+    return list(wn_frames)
 
 
 def load_verb_inventory(path: Union[str, Path]) -> VerbInventory:
@@ -288,31 +327,36 @@ def _frame_entry_from_text(frame: str) -> Optional[Dict]:
     text = frame.strip().lower()
     if not text or "----" not in text:
         return None
-    base = None
-    if "somebody ----s somebody something" in text:
-        base = "ditrans"
-    elif "somebody ----s somebody" in text or "somebody ----s something" in text:
-        base = "trans"
-    elif "something ----s somebody" in text or "something ----s something" in text:
-        base = "trans"
-    elif "somebody ----s" in text or "something ----s" in text:
-        base = "intr"
-    if base is None:
+
+    tokens = text.replace(",", " ").replace("/", " ").split()
+    try:
+        verb_idx = next(i for i, tok in enumerate(tokens) if "----" in tok)
+    except StopIteration:
         return None
-    entry: Dict[str, str] = {"type": base}
-    for prep in _PREP_KEYWORDS:
-        needle = f" {prep} "
-        if needle in text:
-            entry["type"] = f"{base}_pp"
-            entry["prep"] = prep
+
+    # Count NP placeholders between the verb and the first prep keyword.
+    obj_tokens = {"somebody", "someone", "something"}
+    prep_pos = None
+    for i, tok in enumerate(tokens[verb_idx + 1 :], start=verb_idx + 1):
+        if tok in _PREP_KEYWORDS:
+            prep_pos = i
             break
-    if "---- up" in text or "---- out" in text or "---- off" in text:
-        # Heuristic: treat frames with explicit particles as particle verbs.
-        for particle in ("up", "out", "off"):
-            if f"---- {particle}" in text:
-                entry["type"] = f"{base}_particle"
-                entry["particle"] = particle
-                break
+
+    span = tokens[verb_idx + 1 : prep_pos] if prep_pos is not None else tokens[verb_idx + 1 :]
+    obj_nps = sum(1 for tok in span if tok in obj_tokens)
+
+    base = "intr"
+    if obj_nps >= 2:
+        base = "ditrans"
+    elif obj_nps == 1:
+        base = "trans"
+
+    entry: Dict[str, str] = {"type": base}
+    if prep_pos is not None:
+        prep = tokens[prep_pos]
+        if prep in _PREP_KEYWORDS:
+            entry["type"] = "intr_pp" if obj_nps == 0 else "ditrans_pp"
+            entry["prep"] = prep
     return entry
 
 
@@ -342,12 +386,6 @@ def _vn_syntax_to_frame(syntax_elem) -> Optional[VerbFrameSpec]:
                 if prep_child is not None:
                     preps.append(prep_child.attrib.get("value"))
 
-    base = "intr"
-    if obj_nps >= 1:
-        base = "trans"
-    if obj_nps >= 2:
-        base = "ditrans"
-
     prep_val: Optional[str] = None
     for raw in preps:
         if not raw:
@@ -363,11 +401,30 @@ def _vn_syntax_to_frame(syntax_elem) -> Optional[VerbFrameSpec]:
         break
 
     if prep_val:
-        return VerbFrameSpec(kind=f"{base}_pp", prep=prep_val, particle=None, separable=False)
-    return VerbFrameSpec(kind=base, prep=None, particle=None, separable=False)
+        # Treat 'to' PPs as intransitive+PP to avoid inflating ditrans_pp counts.
+        if prep_val == "to":
+            return VerbFrameSpec(kind="intr_pp", prep=prep_val, particle=None, separable=False)
+
+        # Treat other PP frames as intransitive+PP unless we see clear evidence of
+        # two objects; this trims noisy NP+PP markings in some VerbNet classes.
+        kind = "ditrans_pp" if obj_nps >= 2 else "intr_pp"
+        return VerbFrameSpec(kind=kind, prep=prep_val, particle=None, separable=False)
+
+    kind = "intr"
+    # Treat true double-NP only when no PP is present.
+    if obj_nps >= 2:
+        kind = "ditrans"
+    elif obj_nps == 1:
+        kind = "trans"
+
+    return VerbFrameSpec(kind=kind, prep=None, particle=None, separable=False)
 
 
-def _collect_verbnet_frames(verbnet_root: Union[str, Path]) -> Dict[str, List[VerbFrameSpec]]:
+def _collect_verbnet_frames(
+    verbnet_root: Union[str, Path],
+    *,
+    transitivity_lexicon: Optional[str] = None,
+) -> Dict[str, List[VerbFrameSpec]]:
     root_path = Path(verbnet_root)
     if not root_path.exists():
         raise RuntimeError(
@@ -420,6 +477,26 @@ def _collect_verbnet_frames(verbnet_root: Union[str, Path]) -> Dict[str, List[Ve
                 continue
             seen.add(key)
             merged.append(frame)
+
+        if merged:
+            has_trans_like = any(_is_transitive_like(f.kind) for f in merged)
+            has_ditrans = any(f.kind == "ditrans" for f in merged)
+            # Drop ditrans_pp 'to' when there is no bare double-object support.
+            if not has_ditrans:
+                merged = [
+                    f
+                    for f in merged
+                    if not (
+                        f.kind == "ditrans_pp"
+                        and f.prep
+                        and f.prep.lower() == "to"
+                    )
+                ]
+            merged = _filter_transitivity_with_wordnet(
+                lemma,
+                merged,
+                transitivity_lexicon,
+            )
         deduped[lemma] = merged
     return deduped
 
@@ -506,11 +583,19 @@ def build_inventory_from_oewn(
 
 def build_inventory_from_verbnet(
     verbnet_root: Union[str, Path],
+    *,
+    transitivity_lexicon: Optional[str] = "oewn:2021",
 ) -> VerbInventory:
     """
     Build a verb inventory from VerbNet frames (preferred for structured subcat info).
+
+    WordNet augmentation is disabled by default to avoid noisy PP guesses, but a
+    lexicon can still be provided so WordNet can veto implausible transitive frames.
     """
-    frames_by_lemma = _collect_verbnet_frames(verbnet_root)
+    frames_by_lemma = _collect_verbnet_frames(
+        verbnet_root,
+        transitivity_lexicon=transitivity_lexicon,
+    )
     entries: List[VerbEntry] = []
     for lemma, frames in frames_by_lemma.items():
         if not frames:

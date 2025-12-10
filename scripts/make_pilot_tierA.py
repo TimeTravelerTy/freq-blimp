@@ -20,6 +20,8 @@ from src.verb_inventory import (
 
 def _verb_cache_path(args) -> Path:
     cache_dir = Path(args.verb_cache_dir).expanduser()
+    # Bump this to invalidate caches when inventory logic changes.
+    cache_version = "v3_wn_heuristic_no_block"
     parts = [
         args.verb_source,
         args.verb_oewn_lexicon,
@@ -30,6 +32,7 @@ def _verb_cache_path(args) -> Path:
         args.verb_oewn_shuffle,
         args.verb_oewn_seed,
         args.verbnet_dir or "default_verbnet",
+        cache_version,
     ]
     key = hashlib.sha1("|".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
     return cache_dir / f"verb_inventory_{key}.json"

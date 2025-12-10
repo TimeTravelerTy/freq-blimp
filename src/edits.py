@@ -228,10 +228,10 @@ _THAT_VERBS = (
 
 # Allow compatible frame backoffs when exact matching fails.
 _FRAME_FAMILY = {
-    "intr": ["trans"],               # intransitive verbs can align with simple transitives
-    "intr_pp": ["trans_pp"],         # PP-taking verbs with no object can align to transitive+PP frames
-    "intr_particle": ["trans_particle"],
-    "trans_pp": ["intr_pp"],         # sometimes inventory marks PP complements as intransitive
+    # Intransitive verbs can align with simple transitives.
+    # PP frames should not back off to ditrans_pp; failing is safer than
+    # mislabeling.
+    "intr": ["trans"],
 }
 
 @lru_cache(maxsize=8192)
@@ -634,14 +634,23 @@ def _frame_kind_for_verb(token):
     iobjs = [child for child in token.children if child.dep_ in _IOBJ_DEPS]
     preps = [child for child in token.children if child.dep_ in _PREP_DEPS]
     particles = [child for child in token.children if child.dep_ in _PARTICLE_DEPS]
+    # spaCy sometimes tags clause markers like "that" as dobj; ignore those so
+    # we do not inflate ditrans labels.
+    objs = [
+        child
+        for child in objs
+        if not (child.dep_ == "dobj" and child.text.lower() == "that")
+    ]
     if len(objs) > 1 or len(iobjs) > 1:
         return None
     if len(preps) > 1 or len(particles) > 1:
         return None
+    if particles:
+        # Phrasal verbs are out of scope for this inventory.
+        return None
     obj = objs[0] if objs else None
     iobj = iobjs[0] if iobjs else None
     prep = preps[0] if preps else None
-    particle = particles[0] if particles else None
     base = "intr"
     if obj:
         base = "trans"
@@ -649,22 +658,18 @@ def _frame_kind_for_verb(token):
         base = "ditrans"
     elif iobj and not obj:
         return None
-    suffix = ""
-    if prep and particle:
-        return None
-    if particle:
-        suffix = "_particle"
-    elif prep:
-        suffix = "_pp"
-    return base + suffix, prep, particle
+    if prep:
+        kind = "intr_pp" if base == "intr" else "ditrans_pp"
+    else:
+        kind = base
+    return kind, prep, None
 
 
 def candidate_verbs(doc):
     """
     Return verb heads that are eligible for swapping. The function focuses on
     lexical verbs (no auxiliaries) and simple argument structures: intransitive,
-    transitive, ditransitive, verbs selecting a single PP complement, and
-    phrasal verbs with a single particle.
+    transitive, ditransitive, and verbs selecting a single PP complement.
     """
     candidates = []
     def _has_that_complement(token):
@@ -1214,8 +1219,6 @@ def verb_swap_all(
                     zipf_weighted=zipf_weighted,
                     zipf_temp=zipf_temp,
                 )
-                if not sample and (prep_text or particle_text):
-                    sample = inventory.sample(fk, rng, zipf_weighted=zipf_weighted, zipf_temp=zipf_temp)
                 if sample:
                     break
             if not sample:
