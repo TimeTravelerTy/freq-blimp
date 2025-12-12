@@ -148,6 +148,7 @@ def tally_frames(
     focus_verbs: Optional[set] = None,
     log_interval_sec: float = 10.0,
     estimated_total: Optional[int] = None,
+    max_sentences: Optional[int] = None,
 ) -> Tuple[Counter, Counter]:
     token_counts: Counter = Counter()
     doc_counts: Counter = Counter()
@@ -213,6 +214,8 @@ def tally_frames(
             doc_buffer = []
             doc_id_current = doc_id
         doc_buffer.append(sent)
+        if max_sentences is not None and processed_sent + len(doc_buffer) >= max_sentences:
+            break
 
     _process_doc_sentences(doc_buffer)
     _log(force=True)
@@ -288,6 +291,12 @@ def main():
         default=False,
         help="Skip the pre-pass to count target sentences; disables ETA but saves time.",
     )
+    ap.add_argument(
+        "--max_sentences",
+        type=int,
+        default=None,
+        help="Stop after processing this many sentences (for quick sampling).",
+    )
     args = ap.parse_args()
 
     nlp = spacy.load("en_core_web_sm", disable=["ner", "textcat"])
@@ -310,6 +319,7 @@ def main():
         focus_verbs=inv_verbs if args.focus_inventory_verbs else None,
         log_interval_sec=args.log_interval_sec,
         estimated_total=total_sents,
+        max_sentences=args.max_sentences,
     )
 
     out_dir = Path(args.out_dir)

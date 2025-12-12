@@ -2,6 +2,7 @@ import os, sys, time
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import argparse, hashlib, json
 from pathlib import Path
+from typing import Optional
 from src.pipeline import build_pilot
 from src.lemma_bank import (
     LemmaBankError,
@@ -36,6 +37,13 @@ def _verb_cache_path(args) -> Path:
     ]
     key = hashlib.sha1("|".join(map(str, parts)).encode("utf-8")).hexdigest()[:16]
     return cache_dir / f"verb_inventory_{key}.json"
+
+def _find_any_verb_cache(cache_dir: Path) -> Optional[Path]:
+    """Return the newest verb cache file in cache_dir, if any."""
+    if not cache_dir.exists():
+        return None
+    candidates = sorted(cache_dir.glob("verb_inventory_*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
 
 def _fmt_zipf(val) -> str:
     if val is None:
@@ -195,6 +203,10 @@ if __name__ == "__main__":
                 verb_inventory_obj = load_verb_inventory(cache_path)
                 used_cache = True
                 print(f"[VerbInventory] Loaded cached VerbNet inventory ({len(verb_inventory_obj.entries)} entries) from {cache_path}.")
+            elif (fallback := _find_any_verb_cache(cache_path.parent)):
+                verb_inventory_obj = load_verb_inventory(fallback)
+                used_cache = True
+                print(f"[VerbInventory] Loaded fallback VerbNet inventory ({len(verb_inventory_obj.entries)} entries) from {fallback}.")
             if verb_inventory_obj is None:
                 verbnet_dir = args.verbnet_dir or Path.home() / "nltk_data" / "corpora" / "verbnet3"
                 try:
@@ -213,6 +225,10 @@ if __name__ == "__main__":
                     verb_inventory_obj = load_verb_inventory(cache_path)
                     used_cache = True
                     print(f"[VerbInventory] Loaded cached verb inventory ({len(verb_inventory_obj.entries)} entries) from {cache_path}.")
+                elif (fallback := _find_any_verb_cache(cache_path.parent)):
+                    verb_inventory_obj = load_verb_inventory(fallback)
+                    used_cache = True
+                    print(f"[VerbInventory] Loaded fallback verb inventory ({len(verb_inventory_obj.entries)} entries) from {fallback}.")
             if verb_inventory_obj is None:
                 if not rare_verbs:
                     try:
