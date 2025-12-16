@@ -76,6 +76,13 @@ def _entry_has_transitive_like(entry: "VerbEntry") -> bool:
     return False
 
 
+def _entry_has_intr(entry: "VerbEntry") -> bool:
+    for frame in entry.frames:
+        if frame.kind and frame.kind.startswith("intr"):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class VerbFrameSpec:
     """
@@ -117,12 +124,15 @@ class VerbInventory:
         self._entries: Tuple[VerbEntry, ...] = tuple(entries)
         frame_index: Dict[str, List[Tuple[VerbEntry, VerbFrameSpec]]] = {}
         lookup_index: Dict[Tuple[str, str], Tuple[VerbEntry, VerbFrameSpec]] = {}
+        lemma_index: Dict[str, VerbEntry] = {}
         for entry in self._entries:
             for frame in entry.frames:
                 frame_index.setdefault(frame.kind, []).append((entry, frame))
                 lookup_index[(entry.lemma.lower(), frame.kind)] = (entry, frame)
+            lemma_index[entry.lemma.lower()] = entry
         self._frame_index = frame_index
         self._lookup_index = lookup_index
+        self._lemma_index = lemma_index
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -143,6 +153,7 @@ class VerbInventory:
         *,
         desired_prep: Optional[str] = None,
         desired_particle: Optional[str] = None,
+        restrict_transitivity: Optional[str] = None,
     ) -> Optional[Sequence[Tuple[VerbEntry, VerbFrameSpec]]]:
         desired_prep_lower = desired_prep.lower() if desired_prep else None
         filtered = [
@@ -171,6 +182,19 @@ class VerbInventory:
             if not with_particle:
                 return None
             filtered = with_particle
+
+        if restrict_transitivity == "intr_only":
+            filtered = [
+                (entry, frame)
+                for entry, frame in filtered
+                if not _entry_has_transitive_like(entry)
+            ]
+        elif restrict_transitivity == "trans_only":
+            filtered = [
+                (entry, frame)
+                for entry, frame in filtered
+                if _entry_has_transitive_like(entry) and not _entry_has_intr(entry)
+            ]
         return filtered
 
     def sample(
@@ -182,6 +206,7 @@ class VerbInventory:
         desired_particle: Optional[str] = None,
         zipf_weighted: bool = False,
         zipf_temp: float = 1.0,
+        restrict_transitivity: Optional[str] = None,
     ) -> Optional[Tuple[VerbEntry, VerbFrameSpec]]:
         choices = self.choices_for_frame(kind)
         if not choices:
@@ -190,6 +215,7 @@ class VerbInventory:
             choices,
             desired_prep=desired_prep,
             desired_particle=desired_particle,
+            restrict_transitivity=restrict_transitivity,
         )
         if filtered is None:
             return None
@@ -209,6 +235,18 @@ class VerbInventory:
         if not lemma_norm:
             return None
         return self._lookup_index.get((lemma_norm, kind))
+
+    def entry_for_lemma(self, lemma: str) -> Optional[VerbEntry]:
+        lemma_norm = (lemma or "").strip().lower()
+        if not lemma_norm:
+            return None
+        return self._lemma_index.get(lemma_norm)
+
+    def lemma_transitivity(self, lemma: str) -> Tuple[bool, bool]:
+        entry = self.entry_for_lemma(lemma)
+        if entry is None:
+            return (False, False)
+        return (_entry_has_transitive_like(entry), _entry_has_intr(entry))
 
     def filter_by_zipf(self, zipf_thr: Optional[float]) -> "VerbInventory":
         if zipf_thr is None:

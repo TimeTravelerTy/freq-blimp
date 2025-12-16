@@ -15,20 +15,20 @@ def _fmt_zipf(val: float) -> str:
 
 def _out_path(ts: str, zipf_val: float, out_dir: Path) -> Path:
     slug = _fmt_zipf(zipf_val)
-    name = f"{ts}_pilot_tierA_zipf{slug}_adj{slug}_verb{slug}.jsonl"
+    name = f"{ts}_rare_blimp_zipf{slug}_adj{slug}_verb{slug}.jsonl"
     return out_dir / name
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Generate multiple pilot tier A datasets for a list of Zipf thresholds."
+        description="Generate multiple rare BLiMP datasets for a list of Zipf thresholds."
     )
     ap.add_argument(
         "--zipf_values",
         nargs="+",
         required=True,
         type=float,
-        help="One or more Zipf thresholds to pass as --zipf_all to make_pilot_tierA.py.",
+        help="One or more Zipf thresholds to pass as --zipf_all to make_rare_dataset.py.",
     )
     ap.add_argument(
         "--out-dir",
@@ -47,7 +47,7 @@ def main() -> None:
     )
     args, passthrough = ap.parse_known_args()
 
-    script_path = Path(__file__).resolve().parent / "make_pilot_tierA.py"
+    script_path = Path(__file__).resolve().parent / "make_rare_dataset.py"
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = args.timestamp or time.strftime("%Y%m%d-%H%M%S")

@@ -136,7 +136,7 @@ def main():
     ap = argparse.ArgumentParser(
         description="Batch NLL scoring over all pilot tier A JSONL datasets in data/processed."
     )
-    ap.add_argument("--pattern", default="data/processed/*pilot_tierA*.jsonl", help="Glob pattern for datasets.")
+    ap.add_argument("--pattern", default="data/processed/*rare_blimp*.jsonl", help="Glob pattern for datasets.")
     ap.add_argument("--model", default="microsoft/phi-2")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-length", type=int, default=64)

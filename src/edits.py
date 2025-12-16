@@ -440,6 +440,41 @@ def _match_casing(template: str, replacement: str) -> str:
     return repl.title() if template[:1].isupper() else repl.lower()
 
 
+def _is_ex_compound(token) -> bool:
+    """
+    Return True when the noun token is part of an 'ex-<noun>' compound
+    tokenized as ['ex', '-', '<noun>'].
+    """
+    if token.i < 2:
+        return False
+    doc = token.doc
+    try:
+        prev_dash = doc[token.i - 1]
+        prev_ex = doc[token.i - 2]
+    except Exception:
+        return False
+    return prev_ex.text.lower() == "ex" and prev_dash.text == "-"
+
+
+def _apply_noun_form(token, form: str, toks) -> str:
+    """
+    Place the inflected noun form into the token list, folding 'ex-<noun>' back
+    into a single token when present. Returns the original surface string that
+    was replaced.
+    """
+    if _is_ex_compound(token):
+        doc = token.doc
+        prev_dash = doc[token.i - 1]
+        prev_ex = doc[token.i - 2]
+        old_surface = f"{prev_ex.text}{prev_dash.text}{token.text}"
+        toks[token.i - 2] = f"ex-{form}"
+        toks[token.i - 1] = ""
+        toks[token.i] = ""
+        return old_surface
+    toks[token.i] = form
+    return token.text
+
+
 def _plural_form_ok(plural: str, lemma: str, singular_forms: tuple[str, ...]) -> bool:
     lower = plural.lower()
     if lower in _SPECIAL_PLURALS:
@@ -785,6 +820,8 @@ def noun_swap_all(
                 require_person = bool(reflexive_info.get("animate")) if reflexive_info else False
             if require_gender is None and reflexive_info:
                 require_gender = reflexive_info.get("gender")
+            if _is_ex_compound(token):
+                require_person = True
             require_person = bool(require_person or require_gender)
             targets.append((token, forced_tag, bool(require_person), require_gender))
             seen.add(idx)
@@ -800,6 +837,8 @@ def noun_swap_all(
             reflexive_info = reflexive_subjects.get(t.i) if isinstance(reflexive_subjects, dict) else None
             require_gender = reflexive_info.get("gender") if reflexive_info else None
             require_person = (reflexive_info.get("animate") if reflexive_info else False) or bool(require_gender)
+            if _is_ex_compound(t):
+                require_person = True
             targets.append((t, t.tag_, require_person, require_gender))
 
     if not targets:
@@ -826,10 +865,10 @@ def noun_swap_all(
             form = inflect_noun(lemma, tag)
             if not form:
                 return None, []
-            toks[token.i] = form
+            old_surface = _apply_noun_form(token, form, toks)
             swaps.append({
                 "i": token.i,
-                "old": token.text,
+                "old": old_surface,
                 "new": form,
                 "tag": tag,
                 "lemma": lemma,
@@ -897,10 +936,10 @@ def noun_swap_all(
             form = inflect_noun(lemma, tag)
             if not form:
                 return None, []
-            toks[token.i] = form
+            old_surface = _apply_noun_form(token, form, toks)
             swaps.append({
                 "i": token.i,
-                "old": token.text,
+                "old": old_surface,
                 "new": form,
                 "tag": tag,
                 "lemma": lemma,
@@ -1107,6 +1146,8 @@ def _normalize_forced_verb_targets(doc, forced_targets) -> List[VerbTarget]:
 def verb_swap_all(
     doc,
     inventory: Optional[VerbInventory],
+    *,
+    transitivity_inventory: Optional[VerbInventory] = None,
     verb_mode: str = "k",
     k: int = 1,
     zipf_thr: Optional[float] = None,
@@ -1128,6 +1169,8 @@ def verb_swap_all(
 
     if inventory is None or inventory.is_empty():
         return None, []
+
+    transitivity_inv = transitivity_inventory if transitivity_inventory is not None else inventory
 
     toks = [t.text for t in doc]
     swaps = []
@@ -1199,18 +1242,49 @@ def verb_swap_all(
 
         if override_list is not None:
             spec = override_list[idx]
-            lemma = spec.get("lemma") if isinstance(spec, dict) else None
-            frame_name = spec.get("frame") if isinstance(spec, dict) else None
-            lookup = inventory.lookup(lemma, frame_name or target.frame_kind)
-            if not lookup:
-                return None, []
-            entry, frame = lookup
-        else:
+            if isinstance(spec, dict):
+                lemma = spec.get("lemma")
+                frame_name = spec.get("frame")
+                lookup = inventory.lookup(lemma, frame_name or target.frame_kind)
+                if not lookup:
+                    return None, []
+                entry, frame = lookup
+            else:
+                spec = None
+                entry = frame = None
+
+        forced_kind = None
+        forced_restrict = None
+        has_trans_like = has_intr = False
+        if transitivity_inv is not None:
+            has_trans_like, has_intr = transitivity_inv.lemma_transitivity(target.lemma)
+            target_transitive_like = target.frame_kind.startswith("trans") or target.frame_kind.startswith("ditrans")
+            target_intransitive_like = target.frame_kind.startswith("intr")
+            wants_intr_only = has_intr and not has_trans_like
+            wants_trans_only = has_trans_like and not has_intr
+            suffix_pp = target.frame_kind.endswith("_pp")
+            if target_transitive_like and wants_intr_only:
+                forced_kind = "intr_pp" if suffix_pp else "intr"
+                forced_restrict = "intr_only"
+            elif target_intransitive_like and wants_trans_only:
+                forced_kind = "ditrans_pp" if suffix_pp else "trans"
+                forced_restrict = "trans_only"
+
+        if override_list is None or entry is None:
             prep_text = target.prep_token.text if target.prep_token is not None else None
             particle_text = target.particle_token.text if target.particle_token is not None else None
-            frame_order = [target.frame_kind] + _FRAME_FAMILY.get(target.frame_kind, [])
+            frame_kind = forced_kind or target.frame_kind
+            frame_order = [frame_kind]
+            if forced_kind is None:
+                frame_order += _FRAME_FAMILY.get(frame_kind, [])
             sample = None
             for fk in frame_order:
+                restrict = forced_restrict
+                if restrict is None:
+                    if fk.startswith("intr"):
+                        restrict = "intr_only"
+                    elif fk.startswith("trans") or fk.startswith("ditrans"):
+                        restrict = "trans_only"
                 sample = inventory.sample(
                     fk,
                     rng,
@@ -1218,6 +1292,7 @@ def verb_swap_all(
                     desired_particle=particle_text,
                     zipf_weighted=zipf_weighted,
                     zipf_temp=zipf_temp,
+                    restrict_transitivity=restrict,
                 )
                 if sample:
                     break
@@ -1280,6 +1355,86 @@ def verb_swap_all(
 
     if not swaps:
         return None, swaps
+
+    text = _detokenize(toks)
+    if text:
+        text = text[0].upper() + text[1:]
+    return text, swaps
+
+
+def verb_swap_from_pool(
+    doc,
+    lemma_pool,
+    *,
+    forced_targets=None,
+    rng: Optional[random.Random] = None,
+):
+    """
+    Swap verbs using a provided lemma pool, preserving the detected frames and
+    keeping any existing prepositions/particles in place.
+    """
+    if rng is None:
+        rng = random
+
+    targets = _normalize_forced_verb_targets(doc, forced_targets or [])
+    if not targets:
+        return None, []
+
+    pool = [
+        (lemma or "").strip().lower()
+        for lemma in (lemma_pool or [])
+        if isinstance(lemma, str)
+    ]
+    pool = [lemma for lemma in pool if lemma and " " not in lemma and "_" not in lemma]
+    if not pool:
+        return None, []
+
+    toks = [t.text for t in doc]
+    swaps = []
+
+    for target in targets:
+        if _frame_requires_prep(target.frame_kind) and target.prep_token is None:
+            return None, []
+        if _frame_requires_particle(target.frame_kind) and target.particle_token is None:
+            return None, []
+
+        pool_order = list(pool)
+        rng.shuffle(pool_order)
+        chosen = None
+        for lemma in pool_order:
+            form = inflect_verb(lemma, target.tag)
+            if form:
+                chosen = (lemma, form)
+                break
+        if not chosen:
+            return None, []
+        lemma, form = chosen
+        toks[target.token.i] = _match_casing(target.token.text, form)
+
+        prep_old = target.prep_token.text if target.prep_token is not None else None
+        prep_new = prep_old
+        if _frame_requires_prep(target.frame_kind):
+            toks[target.prep_token.i] = prep_old
+
+        particle_old = target.particle_token.text if target.particle_token is not None else None
+        particle_new = particle_old
+        if _frame_requires_particle(target.frame_kind):
+            toks[target.particle_token.i] = particle_old
+
+        swaps.append({
+            "i": target.token.i,
+            "old": target.token.text,
+            "new": toks[target.token.i],
+            "tag": target.tag,
+            "lemma": lemma,
+            "frame": target.frame_kind,
+            "prep_i": target.prep_token.i if target.prep_token is not None else None,
+            "prep_old": prep_old,
+            "prep_new": prep_new,
+            "particle_i": target.particle_token.i if target.particle_token is not None else None,
+            "particle_old": particle_old,
+            "particle_new": particle_new,
+        })
 
     text = _detokenize(toks)
     if text:

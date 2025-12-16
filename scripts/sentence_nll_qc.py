@@ -264,7 +264,7 @@ def _save_typical_cache(model: str, fingerprint: str, items: List[dict]) -> None
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="data/processed/pilot_tierA.jsonl")
+    ap.add_argument("--data", default="data/processed/rare_blimp.jsonl")
     ap.add_argument("--model", default="meta-llama/Meta-Llama-3-8B")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-length", type=int, default=256)
