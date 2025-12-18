@@ -33,6 +33,7 @@ results/
 .env
 venv/
 .venv/
+blimp_venv/
 .envrc
 
 # Misc
