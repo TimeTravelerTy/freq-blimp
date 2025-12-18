@@ -579,6 +579,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 "prep_i": g_target.prep_token.i if g_target.prep_token is not None else None,
                                 "particle_i": g_target.particle_token.i if g_target.particle_token is not None else None,
                                 "that_clause": g_target.has_that_clause,
+                                "wh_marker": g_target.wh_marker,
                             },
                             {
                                 "i": b_match.token.i,
@@ -588,6 +589,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 "prep_i": b_match.prep_token.i if b_match.prep_token is not None else None,
                                 "particle_i": b_match.particle_token.i if b_match.particle_token is not None else None,
                                 "that_clause": b_match.has_that_clause,
+                                "wh_marker": b_match.wh_marker,
                             }
                         ))
                         used_bad_verbs.add(b_match.token.i)
@@ -636,6 +638,13 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 b_entry = dict(b_spec)
                                 g_entry["that_clause"] = bool(g_spec.get("that_clause"))
                                 b_entry["that_clause"] = bool(b_spec.get("that_clause"))
+                                # For filler-gap tasks, the bad sentence may contain the wh-word
+                                # ("what"/"who") even when the good sentence uses "that". Use the
+                                # union marker so both sides sample from wh-compatible verbs.
+                                shared_wh = g_spec.get("wh_marker") or b_spec.get("wh_marker")
+                                if shared_wh:
+                                    g_entry["wh_marker"] = shared_wh
+                                    b_entry["wh_marker"] = shared_wh
 
                                 # Argument-structure subtasks often encode the
                                 # grammaticality contrast via (mis)matching a

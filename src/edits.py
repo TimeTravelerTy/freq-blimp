@@ -882,13 +882,19 @@ def _clause_verb_options(target: VerbTarget, *, zipf_thr: Optional[float]) -> Li
     whitelists = _load_clause_verb_whitelists()
     that_list = whitelists.get("that") if isinstance(whitelists.get("that"), list) else []
     both_list = whitelists.get("both") if isinstance(whitelists.get("both"), list) else []
+    wh_map = whitelists.get("wh") if isinstance(whitelists.get("wh"), dict) else {}
+    wh_list = []
+    if target.wh_marker and isinstance(target.wh_marker, str) and isinstance(wh_map, dict):
+        raw = wh_map.get(target.wh_marker.strip().lower())
+        if isinstance(raw, list):
+            wh_list = raw
 
     # Wh adjacency in COCA is noisy (often wh-objects like "buy what"), so for
     # BLiMP filler-gap tasks we rely on clause-embedding verbs (that/ccomp) for
     # both that- and wh-complements.
     # Prefer the COCA-derived ``both`` set when available; it tends to exclude
     # false positives that co-occur with "that" but rarely embed wh-clauses.
-    options = list(both_list) + list(that_list) + list(_THAT_VERBS)
+    options = list(wh_list) + list(both_list) + list(that_list) + list(_THAT_VERBS)
 
     # Normalize + dedupe.
     normalized = []
@@ -1305,11 +1311,13 @@ def _normalize_forced_verb_targets(doc, forced_targets) -> List[VerbTarget]:
             prep_idx = entry.get("prep_i")
             particle_idx = entry.get("particle_i")
             that_clause = bool(entry.get("that_clause"))
+            forced_wh = entry.get("wh_marker")
         elif isinstance(entry, (tuple, list)) and len(entry) >= 3:
             idx, tag, frame = entry[:3]
             prep_idx = entry[3] if len(entry) > 3 else None
             particle_idx = entry[4] if len(entry) > 4 else None
             that_clause = False
+            forced_wh = None
         else:
             continue
         if not isinstance(idx, int) or idx < 0 or idx >= len(doc):
@@ -1321,6 +1329,7 @@ def _normalize_forced_verb_targets(doc, forced_targets) -> List[VerbTarget]:
         has_ccomp = ccomp is not None
         inferred_that = _has_that(ccomp)
         inferred_wh = _wh_marker(ccomp)
+        wh_marker = forced_wh if isinstance(forced_wh, str) and forced_wh.strip() else inferred_wh
         actual_tag = tag or token.tag_
         frame_kind = frame or _frame_kind_for_verb(token)
         if isinstance(frame_kind, tuple):
@@ -1346,7 +1355,7 @@ def _normalize_forced_verb_targets(doc, forced_targets) -> List[VerbTarget]:
             particle_token=particle_token,
             has_that_clause=bool(that_clause or inferred_that),
             has_clausal_complement=bool(has_ccomp or that_clause or inferred_that),
-            wh_marker=inferred_wh,
+            wh_marker=wh_marker,
         ))
         seen.add(idx)
     return targets
