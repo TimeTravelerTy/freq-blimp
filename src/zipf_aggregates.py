@@ -1,0 +1,110 @@
+import statistics
+from typing import Any, Dict, Iterable, List, Optional
+
+from wordfreq import zipf_frequency
+
+
+def _zipf(word: str) -> float:
+    return float(zipf_frequency(word, "en"))
+
+
+def _values_to_aggs(values: List[float]) -> Dict[str, Optional[float]]:
+    oov_count = sum(1 for v in values if v <= 0.0)
+    in_vocab = [v for v in values if v > 0.0]
+    if not in_vocab:
+        return {"n": 0, "oov_count": oov_count, "mean": None, "median": None, "min": None}
+    return {
+        "n": len(in_vocab),
+        "oov_count": oov_count,
+        "mean": sum(in_vocab) / len(in_vocab),
+        "median": float(statistics.median(in_vocab)),
+        "min": float(min(in_vocab)),
+    }
+
+
+def _delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
+    if a is None or b is None:
+        return None
+    return a - b
+
+
+def _extract_words_from_swaps(
+    swap_items: Iterable[Dict[str, Any]],
+    *,
+    which: str,
+) -> List[str]:
+    words: List[str] = []
+    for s in swap_items:
+        w = s.get(which)
+        if isinstance(w, str) and w:
+            words.append(w)
+
+        prep = s.get(f"prep_{which}")
+        if isinstance(prep, str) and prep:
+            words.append(prep)
+
+        particle = s.get(f"particle_{which}")
+        if isinstance(particle, str) and particle:
+            words.append(particle)
+    return words
+
+
+def add_zipf_aggregates(record: Dict[str, Any]) -> Dict[str, Any]:
+    meta = record.get("meta") or {}
+
+    g_swaps = list(meta.get("g_swaps") or [])
+    b_swaps = list(meta.get("b_swaps") or [])
+    g_adj_swaps = list(meta.get("g_adj_swaps") or [])
+    b_adj_swaps = list(meta.get("b_adj_swaps") or [])
+    g_verb_swaps = list(meta.get("g_verb_swaps") or [])
+    b_verb_swaps = list(meta.get("b_verb_swaps") or [])
+
+    good_original_words = (
+        _extract_words_from_swaps(g_swaps, which="old")
+        + _extract_words_from_swaps(g_adj_swaps, which="old")
+        + _extract_words_from_swaps(g_verb_swaps, which="old")
+    )
+    bad_original_words = (
+        _extract_words_from_swaps(b_swaps, which="old")
+        + _extract_words_from_swaps(b_adj_swaps, which="old")
+        + _extract_words_from_swaps(b_verb_swaps, which="old")
+    )
+    good_rare_words = (
+        _extract_words_from_swaps(g_swaps, which="new")
+        + _extract_words_from_swaps(g_adj_swaps, which="new")
+        + _extract_words_from_swaps(g_verb_swaps, which="new")
+    )
+    bad_rare_words = (
+        _extract_words_from_swaps(b_swaps, which="new")
+        + _extract_words_from_swaps(b_adj_swaps, which="new")
+        + _extract_words_from_swaps(b_verb_swaps, which="new")
+    )
+
+    zipf_values = {
+        "good_original": [_zipf(w) for w in good_original_words],
+        "bad_original": [_zipf(w) for w in bad_original_words],
+        "good_rare": [_zipf(w) for w in good_rare_words],
+        "bad_rare": [_zipf(w) for w in bad_rare_words],
+    }
+    aggs = {k: _values_to_aggs(v) for k, v in zipf_values.items()}
+
+    deltas = {
+        "good_rare_minus_original": {
+            "mean": _delta(aggs["good_rare"]["mean"], aggs["good_original"]["mean"]),
+            "median": _delta(aggs["good_rare"]["median"], aggs["good_original"]["median"]),
+            "min": _delta(aggs["good_rare"]["min"], aggs["good_original"]["min"]),
+        },
+        "bad_rare_minus_original": {
+            "mean": _delta(aggs["bad_rare"]["mean"], aggs["bad_original"]["mean"]),
+            "median": _delta(aggs["bad_rare"]["median"], aggs["bad_original"]["median"]),
+            "min": _delta(aggs["bad_rare"]["min"], aggs["bad_original"]["min"]),
+        },
+    }
+
+    meta_out = dict(meta)
+    meta_out["zipf_swapped_position_aggregates"] = aggs
+    meta_out["zipf_swapped_position_deltas"] = deltas
+
+    out = dict(record)
+    out["meta"] = meta_out
+    return out

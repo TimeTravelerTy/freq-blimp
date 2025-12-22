@@ -100,16 +100,16 @@ def _score_dataset(
         per_record.setdefault(item["row"], {})[item["variant"]] = item
 
     variant_stats = _aggregate_by_variant(items)
-    rare_good = _pairwise_stats(per_record, "good_typical", "good_rare", "total_nll")
-    rare_bad = _pairwise_stats(per_record, "bad_typical", "bad_rare", "total_nll")
-    good_vs_bad_typical = _good_bad_stats(per_record, "good_typical", "bad_typical", "total_nll")
+    rare_good = _pairwise_stats(per_record, "good_original", "good_rare", "total_nll")
+    rare_bad = _pairwise_stats(per_record, "bad_original", "bad_rare", "total_nll")
+    good_vs_bad_typical = _good_bad_stats(per_record, "good_original", "bad_original", "total_nll")
     good_vs_bad_rare = _good_bad_stats(per_record, "good_rare", "bad_rare", "total_nll")
-    rare_good_char = _pairwise_stats(per_record, "good_typical", "good_rare", "nll_per_char")
-    rare_bad_char = _pairwise_stats(per_record, "bad_typical", "bad_rare", "nll_per_char")
-    good_vs_bad_typical_char = _good_bad_stats(per_record, "good_typical", "bad_typical", "nll_per_char")
+    rare_good_char = _pairwise_stats(per_record, "good_original", "good_rare", "nll_per_char")
+    rare_bad_char = _pairwise_stats(per_record, "bad_original", "bad_rare", "nll_per_char")
+    good_vs_bad_typical_char = _good_bad_stats(per_record, "good_original", "bad_original", "nll_per_char")
     good_vs_bad_rare_char = _good_bad_stats(per_record, "good_rare", "bad_rare", "nll_per_char")
     rare_penalty = _rare_penalty_stats(per_record)
-    subtask_rows = _subtask_deltas(items, "good_typical", "good_rare")
+    subtask_rows = _subtask_deltas(items, "good_original", "good_rare")
 
     out_path = _out_path_for(model, data_path, out_dir, limit)
     summary = {
@@ -121,10 +121,10 @@ def _score_dataset(
         "max_length": max_length,
         "limit": limit,
         "variant_stats": variant_stats,
-        "rare_vs_typical": {"good": rare_good, "bad": rare_bad},
-        "good_vs_bad": {"typical": good_vs_bad_typical, "rare": good_vs_bad_rare},
-        "rare_vs_typical_char": {"good": rare_good_char, "bad": rare_bad_char},
-        "good_vs_bad_char": {"typical": good_vs_bad_typical_char, "rare": good_vs_bad_rare_char},
+        "rare_vs_original": {"good": rare_good, "bad": rare_bad},
+        "good_vs_bad": {"original": good_vs_bad_typical, "rare": good_vs_bad_rare},
+        "rare_vs_original_char": {"good": rare_good_char, "bad": rare_bad_char},
+        "good_vs_bad_char": {"original": good_vs_bad_typical_char, "rare": good_vs_bad_rare_char},
         "rare_penalty_per_swap": rare_penalty,
         "subtask_gaps_good": subtask_rows,
         "details": items,

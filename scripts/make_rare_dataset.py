@@ -46,7 +46,7 @@ def _default_out_path(args) -> Path:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tier_cfg", default="configs/tierA.yaml")
+    ap.add_argument("--tier_cfg", default="configs/blimp_all.yaml")
     ap.add_argument("--becl_path", default="data/external/becl_lemma.tsv")
     ap.add_argument("--quant_cfg", default="configs/quantifier_map.yaml")
     ap.add_argument(

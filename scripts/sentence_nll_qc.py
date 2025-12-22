@@ -19,7 +19,19 @@ else:  # pragma: no cover
 
 
 Variant = str
-VARIANTS: Sequence[Variant] = ("good_typical", "bad_typical", "good_rare", "bad_rare")
+VARIANTS: Sequence[Variant] = ("good_original", "bad_original", "good_rare", "bad_rare")
+
+_LEGACY_VARIANTS = {
+    "good_original": "good_typical",
+    "bad_original": "bad_typical",
+}
+
+
+def _get_variant_text(rec: dict, variant: Variant) -> Optional[str]:
+    text = rec.get(variant)
+    if not text and variant in _LEGACY_VARIANTS:
+        text = rec.get(_LEGACY_VARIANTS[variant])
+    return text
 
 
 def _mean(xs: List[float]) -> float:
@@ -124,7 +136,7 @@ def _build_items(records: List[dict]):
         g_verb_swaps = meta.get("g_verb_swaps") or []
         k_swaps = len(g_swaps) + len(g_adj_swaps) + len(g_verb_swaps)
         for variant in VARIANTS:
-            text = rec.get(variant)
+            text = _get_variant_text(rec, variant)
             if not text:
                 continue
             char_len = len(text)
@@ -226,10 +238,10 @@ def _rare_penalty_stats(per_record: Dict[int, Dict[Variant, dict]]):
     per_swap_total = []
     per_swap_char = []
     for variants in per_record.values():
-        if "good_typical" not in variants or "good_rare" not in variants:
+        if "good_original" not in variants or "good_rare" not in variants:
             continue
         rare = variants["good_rare"]
-        typical = variants["good_typical"]
+        typical = variants["good_original"]
         k = rare.get("k_swaps") or typical.get("k_swaps") or 0
         if k <= 0:
             continue
@@ -278,7 +290,7 @@ def _typical_cache_path(model: str) -> Path:
 
 
 def _typical_fingerprint(items: List[dict]) -> str:
-    typical = [it for it in items if it.get("variant") in ("good_typical", "bad_typical")]
+    typical = [it for it in items if it.get("variant") in ("good_original", "bad_original")]
     typical.sort(key=lambda it: (it.get("row"), it.get("variant")))
     payload = "\n".join(f"{it.get('row')}|{it.get('variant')}|{it.get('text')}" for it in typical)
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
@@ -323,7 +335,7 @@ def _save_typical_cache(model: str, fingerprint: str, items: List[dict]) -> None
             "char_len": it.get("char_len", len(it.get("text") or "")),
         }
         for it in items
-        if it.get("variant") in ("good_typical", "bad_typical")
+        if it.get("variant") in ("good_original", "bad_original")
     ]
     payload = {"fingerprint": fingerprint, "scores": typical}
     with path.open("w", encoding="utf-8") as f:
@@ -428,16 +440,16 @@ def main():
         per_record[item["row"]][item["variant"]] = item
 
     variant_stats = _aggregate_by_variant(items)
-    rare_good = _pairwise_stats(per_record, "good_typical", "good_rare", "total_nll")
-    rare_bad = _pairwise_stats(per_record, "bad_typical", "bad_rare", "total_nll")
-    good_vs_bad_typical = _good_bad_stats(per_record, "good_typical", "bad_typical", "total_nll")
+    rare_good = _pairwise_stats(per_record, "good_original", "good_rare", "total_nll")
+    rare_bad = _pairwise_stats(per_record, "bad_original", "bad_rare", "total_nll")
+    good_vs_bad_typical = _good_bad_stats(per_record, "good_original", "bad_original", "total_nll")
     good_vs_bad_rare = _good_bad_stats(per_record, "good_rare", "bad_rare", "total_nll")
-    rare_good_char = _pairwise_stats(per_record, "good_typical", "good_rare", "nll_per_char")
-    rare_bad_char = _pairwise_stats(per_record, "bad_typical", "bad_rare", "nll_per_char")
-    good_vs_bad_typical_char = _good_bad_stats(per_record, "good_typical", "bad_typical", "nll_per_char")
+    rare_good_char = _pairwise_stats(per_record, "good_original", "good_rare", "nll_per_char")
+    rare_bad_char = _pairwise_stats(per_record, "bad_original", "bad_rare", "nll_per_char")
+    good_vs_bad_typical_char = _good_bad_stats(per_record, "good_original", "bad_original", "nll_per_char")
     good_vs_bad_rare_char = _good_bad_stats(per_record, "good_rare", "bad_rare", "nll_per_char")
     rare_penalty = _rare_penalty_stats(per_record)
-    subtask_rows = _subtask_deltas(items, "good_typical", "good_rare")
+    subtask_rows = _subtask_deltas(items, "good_original", "good_rare")
 
     out_path = Path(args.out) if args.out else _default_out_path(args.model, args.limit)
 
@@ -450,10 +462,10 @@ def main():
         "max_length": args.max_length,
         "limit": args.limit,
         "variant_stats": variant_stats,
-        "rare_vs_typical": {"good": rare_good, "bad": rare_bad},
-        "good_vs_bad": {"typical": good_vs_bad_typical, "rare": good_vs_bad_rare},
-        "rare_vs_typical_char": {"good": rare_good_char, "bad": rare_bad_char},
-        "good_vs_bad_char": {"typical": good_vs_bad_typical_char, "rare": good_vs_bad_rare_char},
+        "rare_vs_original": {"good": rare_good, "bad": rare_bad},
+        "good_vs_bad": {"original": good_vs_bad_typical, "rare": good_vs_bad_rare},
+        "rare_vs_original_char": {"good": rare_good_char, "bad": rare_bad_char},
+        "good_vs_bad_char": {"original": good_vs_bad_typical_char, "rare": good_vs_bad_rare_char},
         "rare_penalty_per_swap": rare_penalty,
         "subtask_gaps_good": subtask_rows,
         "details": items,
@@ -469,7 +481,7 @@ def main():
             f"mean_tokens={stats['mean_tokens']:.1f}"
         )
 
-    print("\nRare vs typical deltas:")
+    print("\nRare vs original deltas:")
     print(
         f"  good: pairs={rare_good['pairs']:5d} pct_rare_higher={rare_good['pct_rare_higher']:.1f}% "
         f"mean_delta={rare_good['mean_delta']:.4f} median_delta={rare_good['median_delta']:.4f}"
@@ -478,7 +490,7 @@ def main():
         f"  bad : pairs={rare_bad['pairs']:5d} pct_rare_higher={rare_bad['pct_rare_higher']:.1f}% "
         f"mean_delta={rare_bad['mean_delta']:.4f} median_delta={rare_bad['median_delta']:.4f}"
     )
-    print("\nRare vs typical deltas (per char):")
+    print("\nRare vs original deltas (per char):")
     print(
         f"  good: pairs={rare_good_char['pairs']:5d} pct_rare_higher={rare_good_char['pct_rare_higher']:.1f}% "
         f"mean_delta={rare_good_char['mean_delta']:.6f} median_delta={rare_good_char['median_delta']:.6f}"
@@ -490,7 +502,7 @@ def main():
 
     print("\nGood vs bad checks:")
     print(
-        f"  typical: pairs={good_vs_bad_typical['pairs']:5d} pct_bad_higher={good_vs_bad_typical['pct_bad_higher']:.1f}% "
+        f"  original: pairs={good_vs_bad_typical['pairs']:5d} pct_bad_higher={good_vs_bad_typical['pct_bad_higher']:.1f}% "
         f"mean_delta={good_vs_bad_typical['mean_delta']:.4f} median_delta={good_vs_bad_typical['median_delta']:.4f}"
     )
     print(
@@ -499,7 +511,7 @@ def main():
     )
     print("\nGood vs bad checks (per char):")
     print(
-        f"  typical: pairs={good_vs_bad_typical_char['pairs']:5d} pct_bad_higher={good_vs_bad_typical_char['pct_bad_higher']:.1f}% "
+        f"  original: pairs={good_vs_bad_typical_char['pairs']:5d} pct_bad_higher={good_vs_bad_typical_char['pct_bad_higher']:.1f}% "
         f"mean_delta={good_vs_bad_typical_char['mean_delta']:.6f} median_delta={good_vs_bad_typical_char['median_delta']:.6f}"
     )
     print(
@@ -517,7 +529,7 @@ def main():
     )
 
     if subtask_rows:
-        print("\nLargest rare/typical NLL gaps by subtask (good sentences):")
+        print("\nLargest rare/original NLL gaps by subtask (good sentences):")
         for row in subtask_rows:
             print(
                 f"  {row['subtask']}: delta={row['delta']:.4f} "

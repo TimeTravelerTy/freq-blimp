@@ -74,7 +74,7 @@ class GrammarPoint:
     row: int
     delta_z: float  # Z_typ - Z_rare
     z_rare: float
-    g_typ: float  # bad_typical - good_typical
+    g_typ: float  # bad_original - good_original
     g_rare: float  # bad_rare - good_rare
     delta_g: float  # g_rare - g_typ
 
@@ -154,9 +154,9 @@ def _collect_points_from_obj(
     grammar_points: List[GrammarPoint] = []
 
     for row, variants in per_row.items():
-        gt = variants.get("good_typical")
+        gt = variants.get("good_original") or variants.get("good_typical")
         gr = variants.get("good_rare")
-        bt = variants.get("bad_typical")
+        bt = variants.get("bad_original") or variants.get("bad_typical")
         br = variants.get("bad_rare")
 
         if isinstance(gt, dict) and isinstance(gr, dict):
@@ -333,7 +333,7 @@ def _plot_good_token_length_vs_zipf_threshold(df_run: pd.DataFrame, out_path: Pa
     import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
 
-    needed = {"zipf_thr", "model_slug", "mean_tokens_good_typical", "mean_tokens_good_rare"}
+    needed = {"zipf_thr", "model_slug", "mean_tokens_good_original", "mean_tokens_good_rare"}
     if not needed.issubset(set(df_run.columns)):
         return
 
@@ -361,10 +361,10 @@ def _plot_good_token_length_vs_zipf_threshold(df_run: pd.DataFrame, out_path: Pa
         sub = sub.sort_values("zipf_thr", ascending=False)
         ax.plot(
             sub["zipf_thr"],
-            sub["mean_tokens_good_typical"],
+            sub["mean_tokens_good_original"],
             marker="o",
             linewidth=1.5,
-            label="good_typical",
+            label="good_original",
         )
         ax.plot(
             sub["zipf_thr"],
@@ -537,7 +537,7 @@ def main() -> None:
             gt_tokens = None
             gr_tokens = None
             try:
-                gt_tokens = float((variant_stats.get("good_typical") or {}).get("mean_tokens"))
+                gt_tokens = float((variant_stats.get("good_original") or variant_stats.get("good_typical") or {}).get("mean_tokens"))
             except (TypeError, ValueError):
                 gt_tokens = None
             try:
@@ -551,7 +551,7 @@ def main() -> None:
                     "model_slug": model_slug,
                     "zipf_thr": float(zipf_thr),
                     "mean_per_swap_nll": float(mean_per_swap),
-                    "mean_tokens_good_typical": gt_tokens,
+                    "mean_tokens_good_original": gt_tokens,
                     "mean_tokens_good_rare": gr_tokens,
                 }
             )

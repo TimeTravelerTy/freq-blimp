@@ -17,6 +17,7 @@ from .rarity import is_rare_lemma
 from .lemma_bank import is_person_noun, is_location_noun
 from .gender_lexicon import load_gender_lexicon
 from .verb_inventory import VerbInventory, load_verb_inventory
+from .zipf_aggregates import add_zipf_aggregates
 
 
 def _format_duration(seconds):
@@ -1279,15 +1280,15 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                     adj_changed = False
                     swap_failed_reason = "pair_collapsed"
 
-                records.append({
+                record = {
                     "group": group_name,
                     "phenomenon": phenomenon,
                     "subtask": cfg,
                     "idx": i,
-                    "good_typical": g,
-                    "bad_typical": b,
+                    "good_original": g,
+                    "bad_original": b,
                     "good_rare": good_rare_val,
-                    "bad_rare":  bad_rare_val,
+                    "bad_rare": bad_rare_val,
                     "meta": {
                         "g_verb_swaps": g_verb_swaps,
                         "b_verb_swaps": b_verb_swaps,
@@ -1310,7 +1311,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                         "req_good": req_g,
                         "req_bad": req_b
                     }
-                })
+                }
+                records.append(add_zipf_aggregates(record))
                 processed += 1
                 if show_progress:
                     last_update = _print_progress(processed, total_items, start_time, last_update)

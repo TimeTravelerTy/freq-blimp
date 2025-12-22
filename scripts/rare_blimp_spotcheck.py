@@ -7,7 +7,19 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-VARIANTS = ("good_typical", "bad_typical", "good_rare", "bad_rare")
+VARIANTS = ("good_original", "bad_original", "good_rare", "bad_rare")
+
+_LEGACY_VARIANTS = {
+    "good_original": "good_typical",
+    "bad_original": "bad_typical",
+}
+
+
+def _get_variant(rec: dict, key: str):
+    val = rec.get(key)
+    if val is None and key in _LEGACY_VARIANTS:
+        val = rec.get(_LEGACY_VARIANTS[key])
+    return val
 
 
 def load_jsonl(path: Path, limit: Optional[int] = None) -> List[dict]:
@@ -29,14 +41,14 @@ def load_jsonl(path: Path, limit: Optional[int] = None) -> List[dict]:
 
 
 def _short(rec: dict) -> str:
-    g = rec.get("good_typical")
-    b = rec.get("bad_typical")
-    gr = rec.get("good_rare")
-    br = rec.get("bad_rare")
+    g = _get_variant(rec, "good_original")
+    b = _get_variant(rec, "bad_original")
+    gr = _get_variant(rec, "good_rare")
+    br = _get_variant(rec, "bad_rare")
     return (
         f"[{rec.get('group')}|{rec.get('subtask')}|row={rec.get('_row')}|idx={rec.get('idx')}]\n"
-        f"  good_typical: {g}\n"
-        f"  bad_typical : {b}\n"
+        f"  good_original: {g}\n"
+        f"  bad_original : {b}\n"
         f"  good_rare   : {gr}\n"
         f"  bad_rare    : {br}\n"
     )
@@ -62,10 +74,10 @@ def spotcheck(records: List[dict], *, sample_k: int, seed: int) -> int:
     re_no_terminal = re.compile(r"[^.!?]$")
 
     for rec in records:
-        gt = rec.get("good_typical")
-        bt = rec.get("bad_typical")
-        gr = rec.get("good_rare")
-        br = rec.get("bad_rare")
+        gt = _get_variant(rec, "good_original")
+        bt = _get_variant(rec, "bad_original")
+        gr = _get_variant(rec, "good_rare")
+        br = _get_variant(rec, "bad_rare")
 
         if has_text(gt) and has_text(bt) and gt == bt:
             same_typical.append(rec)
@@ -89,7 +101,7 @@ def spotcheck(records: List[dict], *, sample_k: int, seed: int) -> int:
 
     print(f"records: {len(records)}")
     print(f"rare missing (good_rare/bad_rare None/empty): {len(missing_rare)}")
-    print(f"good_typical == bad_typical: {len(same_typical)}")
+    print(f"good_original == bad_original: {len(same_typical)}")
     print(f"good_rare == bad_rare (when present): {len(same_rare)}")
     print(f"rare w/o terminal punctuation: {len(no_terminal_punct)} (counting variants)")
     print(f"rare plural-possessive spacing merge (e.g., customers'wife): {len(plural_possessive_merges)} (counting variants)")

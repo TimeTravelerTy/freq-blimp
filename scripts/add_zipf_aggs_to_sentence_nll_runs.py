@@ -5,7 +5,17 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VARIANTS: Sequence[str] = ("good_typical", "bad_typical", "good_rare", "bad_rare")
+VARIANTS: Sequence[str] = ("good_original", "bad_original", "good_rare", "bad_rare")
+
+_LEGACY_VARIANTS = {
+    "good_original": "good_typical",
+    "bad_original": "bad_typical",
+}
+
+def _canon_variant(variant: str) -> str:
+    # Keep the `details[].variant` field as-is; this is for indexing into
+    # per-entry Zipf aggregate maps inside the dataset meta.
+    return _LEGACY_VARIANTS.get(variant, variant)
 
 
 def _mean(xs: List[float]) -> float:
@@ -122,14 +132,14 @@ def _zipf_rare_vs_typical(details: List[dict]) -> dict:
 
     return {
         "good": {
-            "mean_zipf": _pairwise_zipf_stats(per_row, "good_typical", "good_rare", "mean"),
-            "median_zipf": _pairwise_zipf_stats(per_row, "good_typical", "good_rare", "median"),
-            "min_zipf": _pairwise_zipf_stats(per_row, "good_typical", "good_rare", "min"),
+            "mean_zipf": _pairwise_zipf_stats(per_row, "good_original", "good_rare", "mean"),
+            "median_zipf": _pairwise_zipf_stats(per_row, "good_original", "good_rare", "median"),
+            "min_zipf": _pairwise_zipf_stats(per_row, "good_original", "good_rare", "min"),
         },
         "bad": {
-            "mean_zipf": _pairwise_zipf_stats(per_row, "bad_typical", "bad_rare", "mean"),
-            "median_zipf": _pairwise_zipf_stats(per_row, "bad_typical", "bad_rare", "median"),
-            "min_zipf": _pairwise_zipf_stats(per_row, "bad_typical", "bad_rare", "min"),
+            "mean_zipf": _pairwise_zipf_stats(per_row, "bad_original", "bad_rare", "mean"),
+            "median_zipf": _pairwise_zipf_stats(per_row, "bad_original", "bad_rare", "median"),
+            "min_zipf": _pairwise_zipf_stats(per_row, "bad_original", "bad_rare", "min"),
         },
     }
 
@@ -168,10 +178,10 @@ def _zipf_good_vs_bad(details: List[dict]) -> dict:
         }
 
     return {
-        "typical": {
-            "mean_zipf": good_bad("good_typical", "bad_typical", "mean"),
-            "median_zipf": good_bad("good_typical", "bad_typical", "median"),
-            "min_zipf": good_bad("good_typical", "bad_typical", "min"),
+        "original": {
+            "mean_zipf": good_bad("good_original", "bad_original", "mean"),
+            "median_zipf": good_bad("good_original", "bad_original", "median"),
+            "min_zipf": good_bad("good_original", "bad_original", "min"),
         },
         "rare": {
             "mean_zipf": good_bad("good_rare", "bad_rare", "mean"),
@@ -202,6 +212,8 @@ def update_run(path: Path, *, inplace: bool, backup_suffix: str) -> bool:
             continue
         meta = zipf_meta_by_row.get(row) or {}
         per_variant = (meta.get("zipf_swapped_position_aggregates") or {}).get(variant)
+        if per_variant is None:
+            per_variant = (meta.get("zipf_swapped_position_aggregates") or {}).get(_canon_variant(variant))
         if isinstance(per_variant, dict):
             if it.get("zipf_swapped_position_agg") != per_variant:
                 it["zipf_swapped_position_agg"] = per_variant
@@ -209,10 +221,16 @@ def update_run(path: Path, *, inplace: bool, backup_suffix: str) -> bool:
 
         deltas = meta.get("zipf_swapped_position_deltas") or {}
         delta_key = None
-        if variant in ("good_typical", "good_rare"):
-            delta_key = "good_rare_minus_typical"
-        elif variant in ("bad_typical", "bad_rare"):
-            delta_key = "bad_rare_minus_typical"
+        if variant in ("good_original", "good_rare"):
+            delta_key = "good_rare_minus_original"
+        elif variant in ("bad_original", "bad_rare"):
+            delta_key = "bad_rare_minus_original"
+        if delta_key is not None and delta_key not in deltas:
+            # Backward compat for older datasets.
+            if delta_key == "good_rare_minus_original":
+                delta_key = "good_rare_minus_typical"
+            elif delta_key == "bad_rare_minus_original":
+                delta_key = "bad_rare_minus_typical"
         if delta_key is not None:
             d = deltas.get(delta_key)
             if isinstance(d, dict) and it.get("zipf_swapped_position_delta") != d:
@@ -288,4 +306,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
