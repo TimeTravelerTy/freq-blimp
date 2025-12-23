@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, List, Optional
 from wordfreq import zipf_frequency
+import wn
 
 from .inflect import (
     inflect_adjective,
@@ -14,7 +15,7 @@ from .inflect import (
     singularize_noun,
 )
 from .rarity import is_rare_lemma
-from .verb_inventory import VerbInventory
+from .verb_inventory import VerbInventory, wordnet_pos_counts
 
 _PARTITIVE_HEADS = {"lot", "lots", "bunch", "number", "couple", "plenty"}
 _UPPER_SPECIAL = {"ii", "iii", "iv"}
@@ -60,6 +61,31 @@ _OBJ_DEPS = {"dobj", "obj"}
 _IOBJ_DEPS = {"iobj", "dative"}
 _PREP_DEPS = {"prep"}
 _PARTICLE_DEPS = {"prt"}
+
+# Common phrasal-verb particles that spaCy may tag as `prt` or `advmod`.
+_PARTICLE_WORDS = {
+    "about",
+    "across",
+    "ahead",
+    "along",
+    "around",
+    "aside",
+    "away",
+    "back",
+    "by",
+    "down",
+    "in",
+    "off",
+    "on",
+    "open",
+    "out",
+    "over",
+    "round",
+    "through",
+    "together",
+    "under",
+    "up",
+}
 _THAT_VERBS = (
     "accept",
     "acknowledge",
@@ -262,16 +288,6 @@ def _zipf_weights(pool: List[str], temp: float = 1.0) -> List[float]:
         weights.append(adj if adj > 0 else 0.001)
     _WEIGHT_CACHE[key] = tuple(weights)
     return weights
-
-
-def _weighted_choice_by_zipf(pool: List[str], rng: random.Random, temp: float = 1.0) -> str:
-    """
-    Prefer lemmas closer to the Zipf ceiling while keeping randomness.
-    """
-    if len(pool) == 1:
-        return pool[0]
-    weights = _zipf_weights(pool, temp=temp)
-    return rng.choices(pool, weights=weights, k=1)[0]
 
 
 def _weighted_order_by_zipf(pool: List[str], rng: random.Random, max_draws: int = 64, temp: float = 1.0) -> List[str]:
@@ -477,6 +493,20 @@ def _apply_noun_form(token, form: str, toks) -> str:
         toks[token.i] = ""
         return old_surface
     toks[token.i] = form
+    # Fix possessive marker for plural / s-final heads (e.g., "horrors's" -> "horrors'").
+    # spaCy tokenizes possessives as a following token with tag_ == "POS" and surface "'s"/"’s".
+    try:
+        doc = token.doc
+        if doc is not None and token.i + 1 < len(doc):
+            nxt = doc[token.i + 1]
+            if nxt is not None and getattr(nxt, "tag_", None) == "POS":
+                raw = (nxt.text or "").strip()
+                if raw in {"'s", "’s"}:
+                    lower = (form or "").strip().lower()
+                    if lower.endswith("s") and len(lower) > 1:
+                        toks[nxt.i] = "'" if raw.startswith("'") else "’"
+    except Exception:
+        pass
     return token.text
 
 
@@ -492,6 +522,38 @@ def _plural_form_ok(plural: str, lemma: str, singular_forms: tuple[str, ...]) ->
         return True
     # Permit irregulars where the singular round-trips to the original lemma.
     return lemma in singular_forms
+
+
+@lru_cache(maxsize=8192)
+def _noun_subjects_cached(lemma: str, lexicon: str = "oewn:2021") -> tuple[str, ...]:
+    norm = (lemma or "").strip().lower()
+    if not norm:
+        return tuple()
+    try:
+        synsets = wn.synsets(norm, pos="n", lexicon=lexicon)
+    except Exception:
+        synsets = ()
+    subjects = set()
+    for syn in synsets or ():
+        md = None
+        try:
+            md = syn.metadata() if callable(getattr(syn, "metadata", None)) else getattr(syn, "metadata", None)
+        except Exception:
+            md = None
+        if isinstance(md, dict):
+            subj = md.get("subject")
+            if isinstance(subj, str) and subj:
+                subjects.add(subj)
+    return tuple(sorted(subjects))
+
+
+@lru_cache(maxsize=8192)
+def _noun_only_in_subjects(lemma: str, subjects: tuple[str, ...], lexicon: str = "oewn:2021") -> bool:
+    subs = _noun_subjects_cached(lemma, lexicon=lexicon)
+    if not subs:
+        return False
+    allowed = set(subjects or ())
+    return all(s in allowed for s in subs)
 
 
 @lru_cache(maxsize=8192)
@@ -521,6 +583,37 @@ def _is_countable_lemma(lemma: str, becl_cls: Optional[str]) -> bool:
     return True
 
 
+@lru_cache(maxsize=8192)
+def _normalize_noun_lemma(lemma: str) -> str:
+    """
+    Normalize noun lemmas so we don't double-inflect plurals.
+
+    Some sources (e.g., OEWN) can include plural-looking noun lemmas like
+    "leaders" or "details". If we treat those as base lemmas and then inflect
+    to NNS, we can produce forms like "leaderses".
+    """
+    if not lemma or not isinstance(lemma, str):
+        return ""
+    lower = lemma.strip().lower()
+    if not lower:
+        return ""
+
+    # If the lemma already looks plural-like (e.g., "humans"), try to recover a
+    # singular that round-trips back to the original surface form. This prevents
+    # double-inflection like "humanses" when later inflecting to NNS.
+    if lower.endswith("s") and len(lower) > 3 and not lower.endswith("ss"):
+        candidates = singularize_noun(lower)
+        for cand in candidates:
+            if cand and cand != lower and pluralize_noun(cand) == lower:
+                return cand
+
+    # If this lemma already looks like its own plural (e.g., "sheep"), keep it.
+    plural = pluralize_noun(lower)
+    if plural is None or plural != lower:
+        return lower
+    return lower
+
+
 def _prepare_pools(
     rare_lemmas,
     rare_person_lemmas,
@@ -528,10 +621,62 @@ def _prepare_pools(
     zipf_thr,
     becl_map,
 ):
-    rare_tuple = rare_lemmas if isinstance(rare_lemmas, tuple) else tuple(rare_lemmas)
+    rare_tuple_raw = rare_lemmas if isinstance(rare_lemmas, tuple) else tuple(rare_lemmas)
     person_tuple = ()
     if rare_person_lemmas:
         person_tuple = rare_person_lemmas if isinstance(rare_person_lemmas, tuple) else tuple(rare_person_lemmas)
+
+    # Normalize noun lemmas (avoid plural bases like "leaders") and de-dupe.
+    def _norm_dedupe(items):
+        out = []
+        seen = set()
+        for item in items:
+            norm = _normalize_noun_lemma(item)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            out.append(norm)
+        return tuple(out)
+
+    rare_tuple = _norm_dedupe(rare_tuple_raw)
+    if person_tuple:
+        person_tuple = _norm_dedupe(person_tuple)
+
+    # Avoid noun replacements that are primarily verbs (e.g., "led" as a noun
+    # replacement even though it's far more common as a verb form).
+    def _noun_dominant(lemma: str) -> bool:
+        v, n, a, r = wordnet_pos_counts(lemma, lexicon="oewn:2021")
+        if n <= 0:
+            return False
+        # Filter out lexicographer-domain nouns that are rarely used as concrete
+        # count nouns in BLiMP contexts (e.g., "spiritual" as a noun).
+        # We only reject lemmas whose noun senses are exclusively in these domains.
+        if _noun_only_in_subjects(lemma, ("noun.communication",), lexicon="oewn:2021"):
+            return False
+        # Keep nouns that are clearly nouns rather than adjective/verb/adverb
+        # items used nominally (e.g., "a wild", "an independent").
+        if v >= n or a >= n or r >= n:
+            return False
+        # Suppress gerund-like nouns with weak noun support (e.g., "studying",
+        # "talking") while keeping established -ing nouns ("building",
+        # "meeting", "painting"). We only apply this when the base verb exists.
+        if lemma.endswith("ing") and len(lemma) > 5:
+            base = lemma[:-3]
+            try:
+                base_verbs = wn.synsets(base, pos="v", lexicon="oewn:2021")
+            except Exception:
+                base_verbs = ()
+            if base_verbs and n < 3:
+                return False
+        return n / (v + 1) >= 1.0
+
+    noun_filtered = tuple(w for w in rare_tuple if _noun_dominant(w))
+    if noun_filtered:
+        rare_tuple = noun_filtered
+    if person_tuple:
+        person_filtered = tuple(w for w in person_tuple if _noun_dominant(w))
+        if person_filtered:
+            person_tuple = person_filtered
 
     key = (
         req,
@@ -669,6 +814,7 @@ class VerbTarget:
     has_that_clause: bool = False
     has_clausal_complement: bool = False
     wh_marker: Optional[str] = None
+    enforce_transitivity: bool = False
 
 
 def _frame_kind_for_verb(token):
@@ -676,6 +822,16 @@ def _frame_kind_for_verb(token):
     iobjs = [child for child in token.children if child.dep_ in _IOBJ_DEPS]
     preps = [child for child in token.children if child.dep_ in _PREP_DEPS]
     particles = [child for child in token.children if child.dep_ in _PARTICLE_DEPS]
+    # Heuristic: some particles are tagged as `advmod` (e.g., "hide away", "stand up").
+    particles += [
+        child
+        for child in token.children
+        if (
+            child.dep_ == "advmod"
+            and child.pos_ in {"ADV", "PART", "ADP", "ADJ"}
+            and (child.text or "").strip().lower() in _PARTICLE_WORDS
+        )
+    ]
     # spaCy sometimes tags clause markers like "that" as dobj; ignore those so
     # we do not inflate ditrans labels.
     objs = [
@@ -687,12 +843,14 @@ def _frame_kind_for_verb(token):
         return None
     if len(preps) > 1 or len(particles) > 1:
         return None
-    if particles:
-        # Phrasal verbs are out of scope for this inventory.
-        return None
     obj = objs[0] if objs else None
     iobj = iobjs[0] if iobjs else None
     prep = preps[0] if preps else None
+    particle = particles[0] if particles else None
+    # Phrasal verbs with both a particle and a PP complement are rare and tricky
+    # to handle robustly (particle movement, PP attachment ambiguity).
+    if particle is not None and prep is not None:
+        return None
     if prep is None:
         # Heuristic: spaCy sometimes fails to attach a PP complement as a `prep`
         # child under ellipsis/coordination; fall back to a short lookahead.
@@ -723,7 +881,9 @@ def _frame_kind_for_verb(token):
         kind = "intr_pp" if base == "intr" else "ditrans_pp"
     else:
         kind = base
-    return kind, prep, None
+    if particle is not None:
+        kind = f"{kind}_particle"
+    return kind, prep, particle
 
 
 def candidate_verbs(doc):
@@ -1374,12 +1534,14 @@ def _normalize_forced_verb_targets(doc, forced_targets) -> List[VerbTarget]:
             particle_idx = entry.get("particle_i")
             that_clause = bool(entry.get("that_clause"))
             forced_wh = entry.get("wh_marker")
+            enforce_transitivity = bool(entry.get("enforce_transitivity"))
         elif isinstance(entry, (tuple, list)) and len(entry) >= 3:
             idx, tag, frame = entry[:3]
             prep_idx = entry[3] if len(entry) > 3 else None
             particle_idx = entry[4] if len(entry) > 4 else None
             that_clause = False
             forced_wh = None
+            enforce_transitivity = False
         else:
             continue
         if not isinstance(idx, int) or idx < 0 or idx >= len(doc):
@@ -1418,6 +1580,7 @@ def _normalize_forced_verb_targets(doc, forced_targets) -> List[VerbTarget]:
             has_that_clause=bool(that_clause or inferred_that),
             has_clausal_complement=bool(has_ccomp or that_clause or inferred_that),
             wh_marker=wh_marker,
+            enforce_transitivity=enforce_transitivity,
         ))
         seen.add(idx)
     return targets
@@ -1433,6 +1596,9 @@ def verb_swap_all(
     zipf_thr: Optional[float] = None,
     zipf_weighted: bool = False,
     zipf_temp: float = 1.0,
+    prefer_verb_lemmas: bool = False,
+    min_verb_share: float = 0.75,
+    verbiness_lexicon: str = "oewn:2021",
     rng: Optional[random.Random] = None,
     forced_targets=None,
     override_specs=None,
@@ -1540,13 +1706,13 @@ def verb_swap_all(
 
         forced_kind = None
         forced_restrict = None
-        has_trans_like = has_intr = False
+        has_trans = has_intr = False
         if transitivity_inv is not None:
-            has_trans_like, has_intr = transitivity_inv.lemma_transitivity(target.lemma)
+            has_trans, has_intr = transitivity_inv.lemma_transitivity(target.lemma)
             target_transitive_like = target.frame_kind.startswith("trans") or target.frame_kind.startswith("ditrans")
             target_intransitive_like = target.frame_kind.startswith("intr")
-            wants_intr_only = has_intr and not has_trans_like
-            wants_trans_only = has_trans_like and not has_intr
+            wants_intr_only = has_intr and not has_trans
+            wants_trans_only = has_trans and not has_intr
             suffix_pp = target.frame_kind.endswith("_pp")
             if target_transitive_like and wants_intr_only:
                 forced_kind = "intr_pp" if suffix_pp else "intr"
@@ -1560,9 +1726,16 @@ def verb_swap_all(
             particle_text = target.particle_token.text if target.particle_token is not None else None
             frame_kind = forced_kind or target.frame_kind
             frame_order = [frame_kind]
-            if forced_kind is None:
+            # When we need transitivity exclusivity to preserve an argument-structure
+            # violation, do not back off to alternate frame families (e.g., intr -> trans).
+            if forced_kind is None and not target.enforce_transitivity:
                 frame_order += _FRAME_FAMILY.get(frame_kind, [])
             sample = None
+
+            observed = _frame_kind_for_verb(target.token)
+            observed_kind = None
+            if isinstance(observed, tuple) and observed:
+                observed_kind = observed[0]
 
             if tied_lemma:
                 for fk in frame_order:
@@ -1576,10 +1749,21 @@ def verb_swap_all(
                     break
                 restrict = forced_restrict
                 if restrict is None:
-                    if fk.startswith("intr"):
-                        restrict = "intr_only"
-                    elif fk.startswith("trans") or fk.startswith("ditrans"):
-                        restrict = "trans_only"
+                    if target.enforce_transitivity:
+                        if fk.startswith("intr"):
+                            restrict = "intr_only"
+                        elif fk.startswith("trans") or fk.startswith("ditrans"):
+                            restrict = "trans_only"
+                    else:
+                        # Only enforce transitivity exclusivity when we are preserving an
+                        # argument-structure violation (i.e., the requested frame does not
+                        # match the surface arguments in the sentence).
+                        if fk.startswith("intr"):
+                            if observed_kind and (observed_kind.startswith("trans") or observed_kind.startswith("ditrans")):
+                                restrict = "intr_only"
+                        elif fk.startswith("trans") or fk.startswith("ditrans"):
+                            if observed_kind and observed_kind.startswith("intr"):
+                                restrict = "trans_only"
                 sample = inventory.sample(
                     fk,
                     rng,
@@ -1588,6 +1772,9 @@ def verb_swap_all(
                     zipf_weighted=zipf_weighted,
                     zipf_temp=zipf_temp,
                     restrict_transitivity=restrict,
+                    prefer_verb_lemmas=prefer_verb_lemmas,
+                    min_verb_share=min_verb_share,
+                    verbiness_lexicon=verbiness_lexicon,
                 )
                 if not sample and prep_text is not None:
                     # If the inventory lacks an exact preposition match, fall back to
@@ -1601,10 +1788,22 @@ def verb_swap_all(
                         zipf_weighted=zipf_weighted,
                         zipf_temp=zipf_temp,
                         restrict_transitivity=restrict,
+                        prefer_verb_lemmas=prefer_verb_lemmas,
+                        min_verb_share=min_verb_share,
+                        verbiness_lexicon=verbiness_lexicon,
                     )
                 if sample:
                     break
             if not sample:
+                # Backwards-compat: if the inventory lacks explicit particle frames,
+                # treat phrasal verbs as ineligible rather than failing the entire swap.
+                if (
+                    override_list is None
+                    and forced_targets is None
+                    and target.frame_kind
+                    and target.frame_kind.endswith("_particle")
+                ):
+                    continue
                 return None, []
             entry, frame = sample
             if override_list is None and entry and entry.lemma:
@@ -1658,6 +1857,9 @@ def verb_swap_all(
             "prep_i": target.prep_token.i if target.prep_token is not None else None,
             "prep_old": prep_old,
             "prep_new": prep_new,
+            "particle_i": target.particle_token.i if target.particle_token is not None else None,
+            "particle_old": particle_old,
+            "particle_new": particle_new,
         })
 
     if not swaps:

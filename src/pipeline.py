@@ -1,4 +1,5 @@
 import random, spacy, yaml, time
+from typing import Optional
 from pathlib import Path
 from .io import load_blimp, write_jsonl
 from .becl import load_becl_tsv
@@ -14,9 +15,9 @@ from .edits import (
     verb_swap_from_pool,
 )
 from .rarity import is_rare_lemma
-from .lemma_bank import is_person_noun, is_location_noun
+from .lemma_bank import is_person_noun, is_location_noun, is_time_noun, is_proper_noun
 from .gender_lexicon import load_gender_lexicon
-from .verb_inventory import VerbInventory, load_verb_inventory
+from .verb_inventory import VerbInventory, load_verb_inventory, wordnet_pos_counts
 from .zipf_aggregates import add_zipf_aggregates
 
 
@@ -276,7 +277,12 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 noun_mode="all", k=2, zipf_thr=3.4, rare_lemmas=None,
                 adj_mode="all", adj_zipf_thr=3.4, rare_adj_lemmas=None,
                 verb_mode="k", verb_zipf_thr=3.4, rare_verb_lemmas=None,
+                verb_zipf_min=None,
+                verb_min_verb_share: float = 1.0,
+                verbiness_lexicon: str = "oewn:2021",
                 swap_targets=("nouns",), seed=0, show_progress=True,
+                record_limit: Optional[int] = None,
+                exclude_proper_nouns: bool = True,
                 rare_name_path="data/external/rare_names.tsv",
                 name_lookup_path="data/external/name_gender_lookup.tsv",
                 name_conf=0.75,
@@ -287,6 +293,15 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 zipf_temp: float = 1.0,
                 spacy_n_process: int = 1,
                 spacy_batch_size: int = 128):
+    if record_limit is not None:
+        try:
+            record_limit = max(0, int(record_limit))
+        except Exception:
+            record_limit = 0
+        # For small capped runs, multi-process spaCy startup dominates runtime.
+        if record_limit and spacy_n_process and spacy_n_process > 1:
+            spacy_n_process = 1
+
     nlp = spacy.load("en_core_web_sm")
     with open(tier_cfg_path, encoding="utf-8") as f:
         tasks_cfg = yaml.safe_load(f)
@@ -318,7 +333,10 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
             sampling_inventory = verb_inventory_obj
             if rare_verb_lemmas:
                 sampling_inventory = sampling_inventory.restrict_to(rare_verb_lemmas)
-            sampling_inventory = sampling_inventory.filter_by_zipf(verb_zipf_thr)
+            sampling_inventory = sampling_inventory.filter_by_zipf(
+                verb_zipf_thr,
+                zipf_min=verb_zipf_min,
+            )
             if sampling_inventory.is_empty():
                 do_verb_swaps = False
             else:
@@ -327,9 +345,30 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
         verb_inventory_obj = None
         verb_inventory_transitivity = None
 
+    verb_sampling_kwargs = {
+        "prefer_verb_lemmas": True,
+        "min_verb_share": float(verb_min_verb_share),
+        "verbiness_lexicon": verbiness_lexicon,
+    }
+
+    def _take_first(dataset, n: int):
+        if n is None:
+            return dataset
+        n = max(0, int(n))
+        if hasattr(dataset, "select"):
+            # HuggingFace Datasets: `ds[:n]` returns a column dict, not a Dataset.
+            return dataset.select(range(n))
+        return dataset[:n]
+
     if do_noun_swaps:
         pool = _prepare_lemma_pool(rare_lemmas, zipf_thr)
-        rare_pool = tuple(lemma for lemma in pool if not is_location_noun(lemma))
+        rare_pool = tuple(
+            lemma
+            for lemma in pool
+            if (not exclude_proper_nouns or not is_proper_noun(lemma))
+            if not is_location_noun(lemma)
+            if not is_time_noun(lemma)
+        )
     else:
         rare_pool = tuple()
 
@@ -359,10 +398,17 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
 
         rare_person_pool_list = list(lexicon_person)
         seen_person = set(rare_person_pool_list)
-        for lemma in rare_pool:
+        # Add person nouns from the full pool even if we excluded them from the
+        # general rare_pool so reflexive constraints can still be satisfied.
+        for lemma in pool:
             if lemma in seen_person:
                 continue
-            if is_person_noun(lemma):
+            if (
+                (not exclude_proper_nouns or not is_proper_noun(lemma))
+                and not is_location_noun(lemma)
+                and not is_time_noun(lemma)
+                and is_person_noun(lemma)
+            ):
                 rare_person_pool_list.append(lemma)
                 seen_person.add(lemma)
         rare_person_pool = tuple(rare_person_pool_list)
@@ -371,30 +417,64 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
 
     if do_adj_swaps:
         rare_adj_pool = _prepare_lemma_pool(rare_adj_lemmas, adj_zipf_thr)
+        # Prefer lemmas that are primarily adjectives (avoid adjective-noun
+        # ambiguities like "independent" / "wild" being treated as adjectives).
+        if rare_adj_pool:
+            def _adj_dominant(lemma: str) -> bool:
+                v, n, a, r = wordnet_pos_counts(lemma, lexicon="oewn:2021")
+                if a <= 0:
+                    return False
+                if n >= a or v >= a or r >= a:
+                    return False
+                # If the lemma is also a noun, require a stronger adjective signal
+                # (reduces adjective-noun ambiguities like "criminal" as an adjective).
+                if n > 0 and a < 2:
+                    return False
+                return True
+
+            filtered_adj = tuple(w for w in rare_adj_pool if _adj_dominant(w))
+            if filtered_adj:
+                rare_adj_pool = filtered_adj
         if not rare_adj_pool:
             do_adj_swaps = False
     else:
         rare_adj_pool = tuple()
 
-    worklist = []
-    total_items = 0
-
-    for group_name, meta in tasks_cfg.items():
+    # Build a lightweight config list (don't load every BLiMP subdataset up
+    # front; that can be slow, especially when record_limit is small).
+    cfg_list = []
+    for group_name, meta in (tasks_cfg or {}).items():
         phenomenon = meta["phenomenon"]
         configs = meta.get("configs", [])
         if not configs:
             continue
         for cfg in configs:
+            cfg_list.append((group_name, phenomenon, cfg))
+
+    total_items = 0
+    if record_limit:
+        total_items = record_limit
+    else:
+        for _, _, cfg in cfg_list:
             ds = load_blimp(cfg)
-            count = len(ds)
-            total_items += count
-            worklist.append((group_name, phenomenon, cfg, ds))
+            total_items += len(ds)
 
     processed = 0
     start_time = time.time()
     last_update = start_time
+    stop_early = False
+    if show_progress:
+        last_update = _print_progress(processed, total_items, start_time, last_update)
 
-    for group_name, phenomenon, cfg, ds in worklist:
+    for group_name, phenomenon, cfg in cfg_list:
+        if record_limit and len(records) >= record_limit:
+            break
+        ds = load_blimp(cfg)
+        if record_limit:
+            remaining = record_limit - len(records)
+            if remaining <= 0:
+                break
+            ds = _take_first(ds, remaining)
         # Parse all good/bad sentences for this subtask in batches to reduce
         # spaCy overhead and allow multi-process parsing.
         def _iter_good_bad(dataset):
@@ -501,6 +581,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 zipf_thr=verb_zipf_thr,
                                 zipf_weighted=zipf_weighted_sampling,
                                 zipf_temp=zipf_temp,
+                                **verb_sampling_kwargs,
                                 rng=rng_good,
                                 forced_targets=g_forced,
                             )
@@ -513,6 +594,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 zipf_thr=verb_zipf_thr,
                                 zipf_weighted=zipf_weighted_sampling,
                                 zipf_temp=zipf_temp,
+                                **verb_sampling_kwargs,
                                 rng=rng_bad,
                                 forced_targets=b_forced,
                             )
@@ -647,24 +729,36 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     g_entry["wh_marker"] = shared_wh
                                     b_entry["wh_marker"] = shared_wh
 
-                                # Argument-structure subtasks often encode the
-                                # grammaticality contrast via (mis)matching a
-                                # verb's transitivity with its surface arguments.
-                                # When the Good/Bad verbs differ, enforce the
-                                # intended transitivity class so swaps preserve
-                                # the violation.
-                                if phenomenon == "argument_structure" and g_spec.get("lemma") != b_spec.get("lemma"):
+                                # Argument-structure subtasks often encode the grammaticality
+                                # contrast via (mis)matching a verb's transitivity with its
+                                # surface arguments. spaCy frame detection can be noisy, so
+                                # for these subtasks we force the intended frame labels.
+                                if phenomenon == "argument_structure":
+                                    def _force_frame(spec: dict, base: str) -> str:
+                                        frame = str(spec.get("frame") or "")
+                                        suffix = "_particle" if frame.endswith("_particle") else ""
+                                        return f"{base}{suffix}"
+
                                     if cfg in {"causative", "transitive"}:
-                                        g_entry["frame"] = "trans"
-                                        b_entry["frame"] = "intr"
+                                        g_entry["frame"] = _force_frame(g_entry, "trans")
+                                        b_entry["frame"] = _force_frame(b_entry, "intr")
+                                        # The bad side needs exclusivity so the violation (intr + dobj)
+                                        # stays ungrammatical after swapping.
+                                        b_entry["enforce_transitivity"] = True
                                     elif cfg in {"inchoative", "intransitive"}:
-                                        b_entry["frame"] = "trans"
+                                        g_entry["frame"] = _force_frame(g_entry, "intr")
+                                        b_entry["frame"] = _force_frame(b_entry, "trans")
+                                        # The bad side needs exclusivity so the violation (trans w/o dobj)
+                                        # stays ungrammatical after swapping.
+                                        b_entry["enforce_transitivity"] = True
                                     elif cfg == "drop_argument":
+                                        g_entry["frame"] = _force_frame(g_entry, "intr")
                                         # If the bad sentence strands a preposition (e.g., "talk to ."),
                                         # keep intr_pp; otherwise force a transitive verb with its object dropped.
                                         b_frame = str(b_entry.get("frame") or "")
                                         if not b_frame.startswith("intr_pp"):
-                                            b_entry["frame"] = "trans"
+                                            b_entry["frame"] = _force_frame(b_entry, "trans")
+                                            b_entry["enforce_transitivity"] = True
 
                                 g_target_specs.append(g_entry)
                                 b_target_specs.append(b_entry)
@@ -704,6 +798,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     zipf_thr=verb_zipf_thr,
                                     zipf_weighted=zipf_weighted_sampling,
                                     zipf_temp=zipf_temp,
+                                    **verb_sampling_kwargs,
                                     rng=rng_verbs,
                                     forced_targets=same_g_specs,
                                 )
@@ -730,6 +825,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                             zipf_thr=verb_zipf_thr,
                                             zipf_weighted=zipf_weighted_sampling,
                                             zipf_temp=zipf_temp,
+                                            **verb_sampling_kwargs,
                                             rng=random.Random(pair_seed - 1),
                                             forced_targets=same_b_specs,
                                             override_specs=override_specs,
@@ -794,6 +890,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     zipf_thr=verb_zipf_thr,
                                     zipf_weighted=zipf_weighted_sampling,
                                     zipf_temp=zipf_temp,
+                                    **verb_sampling_kwargs,
                                     rng=rng_verbs,
                                     forced_targets=g_target_specs,
                                 )
@@ -809,6 +906,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                         zipf_thr=verb_zipf_thr,
                                         zipf_weighted=zipf_weighted_sampling,
                                         zipf_temp=zipf_temp,
+                                        **verb_sampling_kwargs,
                                         rng=random.Random(b_seed),
                                         forced_targets=b_target_specs,
                                     )
@@ -838,6 +936,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 zipf_thr=verb_zipf_thr,
                                 zipf_weighted=zipf_weighted_sampling,
                                 zipf_temp=zipf_temp,
+                                **verb_sampling_kwargs,
                                 rng=rng_verbs,
                                 forced_targets=g_target_specs,
                             )
@@ -869,6 +968,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                         zipf_thr=verb_zipf_thr,
                                         zipf_weighted=zipf_weighted_sampling,
                                         zipf_temp=zipf_temp,
+                                        **verb_sampling_kwargs,
                                         rng=random.Random(b_seed),
                                         forced_targets=b_target_specs,
                                         override_specs=override_specs or None,
@@ -1316,5 +1416,10 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 processed += 1
                 if show_progress:
                     last_update = _print_progress(processed, total_items, start_time, last_update)
+        # Exhaust the generator to avoid leaving pending docs when breaking early.
+        if record_limit and len(records) >= record_limit:
+            stop_early = True
+        if stop_early:
+            break
 
     write_jsonl(out_path, records)

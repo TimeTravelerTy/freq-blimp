@@ -31,6 +31,7 @@ _WORD_RE = re.compile(r"^[a-z]+$")
 _PERSON_SUFFIXES = ("ist", "er", "or", "phile", "ian", "man", "woman")
 _PERSON_DOMAIN = "noun.person"
 _LOCATION_DOMAIN = "noun.location"
+_TIME_DOMAIN = "noun.time"
 
 
 class LemmaBankError(RuntimeError):
@@ -251,17 +252,17 @@ def _lemma_has_domain(lemma: str, lexicon: str, domain: str) -> bool:
         return False
 
     def _matches(syn) -> bool:
+        # wn>=0.13 exposes lexicographer domains via `metadata()['subject']`
+        # (e.g., 'noun.person', 'noun.location').
+        md = None
         try:
-            lex_domain = syn.lexdomain()
-        except AttributeError:
-            lex_domain = None
-        if lex_domain is not None and getattr(lex_domain, "id", None) == domain:
-            return True
-        try:
-            if syn.lexname() == domain:
+            md = syn.metadata() if callable(getattr(syn, "metadata", None)) else getattr(syn, "metadata", None)
+        except Exception:
+            md = None
+        if isinstance(md, dict):
+            subj = md.get("subject")
+            if isinstance(subj, str) and subj == domain:
                 return True
-        except AttributeError:
-            pass
         return False
 
     for syn in synsets:
@@ -300,7 +301,42 @@ def is_person_noun(lemma: str, *, lexicon: str = _DEFAULT_LEXICON) -> bool:
 def _is_location_noun_cached(lemma: str, lexicon: str) -> bool:
     if not lemma:
         return False
-    return _lemma_has_domain(lemma, lexicon, _LOCATION_DOMAIN)
+    if _lemma_has_domain(lemma, lexicon, _LOCATION_DOMAIN):
+        return True
+    # Fallback: some OEWN synsets lack location domains in metadata. Use a small
+    # definition-keyword heuristic to still exclude landforms/places.
+    try:
+        synsets = wn.synsets(lemma, pos="n", lexicon=lexicon)
+    except Exception:
+        synsets = ()
+    keywords = (
+        "mountain",
+        "hill",
+        "valley",
+        "island",
+        "peninsula",
+        "continent",
+        "river",
+        "lake",
+        "ocean",
+        "sea",
+        "bay",
+        "harbor",
+        "forest",
+        "desert",
+        "glacier",
+        "volcano",
+    )
+    for syn in synsets or ():
+        try:
+            definition = syn.definition()
+        except Exception:
+            definition = None
+        if definition:
+            text = str(definition).strip().lower()
+            if any(k in text for k in keywords):
+                return True
+    return False
 
 
 def is_location_noun(lemma: str, *, lexicon: str = _DEFAULT_LEXICON) -> bool:
@@ -311,3 +347,61 @@ def is_location_noun(lemma: str, *, lexicon: str = _DEFAULT_LEXICON) -> bool:
     if not norm:
         return False
     return _is_location_noun_cached(norm, lexicon)
+
+
+def is_time_noun(lemma: str, *, lexicon: str = _DEFAULT_LEXICON) -> bool:
+    """
+    Return True if WordNet marks the noun lemma as a time / temporal concept.
+    """
+    norm = (lemma or "").strip().lower()
+    if not norm:
+        return False
+    return _lemma_has_domain(norm, lexicon, _TIME_DOMAIN)
+
+
+@lru_cache(maxsize=4096)
+def _is_proper_noun_cached(lemma: str, lexicon: str) -> bool:
+    """
+    Return True if WordNet treats the noun lemma as an instance (proper noun).
+
+    In Open English WordNet, proper nouns appear as noun synsets with an
+    `instance_hypernym` relation.
+    """
+    if not lemma:
+        return False
+    _load_lexicon(lexicon)
+    try:
+        synsets = wn.synsets(lemma, pos="n", lexicon=lexicon)
+    except Exception:
+        return False
+    for syn in synsets:
+        try:
+            rels = syn.relations()
+        except Exception:
+            rels = {}
+        if isinstance(rels, dict) and rels.get("instance_hypernym"):
+            return True
+        # Some entries (abbreviations, named months, etc.) are not marked with
+        # instance relations but do appear with capitalized lemma variants.
+        try:
+            words = syn.words()
+        except Exception:
+            words = ()
+        for w in words or ():
+            try:
+                surface = w.lemma()
+            except Exception:
+                surface = None
+            if surface and surface.lower() == lemma and any(ch.isupper() for ch in surface):
+                return True
+    return False
+
+
+def is_proper_noun(lemma: str, *, lexicon: str = _DEFAULT_LEXICON) -> bool:
+    """
+    Return True if the noun lemma is a proper noun instance in WordNet.
+    """
+    norm = (lemma or "").strip().lower()
+    if not norm:
+        return False
+    return _is_proper_noun_cached(norm, lexicon)

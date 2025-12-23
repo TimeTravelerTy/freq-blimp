@@ -26,6 +26,10 @@ _SUPPORTED_FRAME_TYPES = {
     "ditrans",
     "intr_pp",
     "ditrans_pp",
+    # Phrasal-verb frames (particle is carried separately in VerbFrameSpec.particle).
+    "intr_particle",
+    "trans_particle",
+    "ditrans_particle",
 }
 
 _PREP_KEYWORDS = (
@@ -100,6 +104,99 @@ def _entry_has_intr(entry: "VerbEntry") -> bool:
         if frame.kind and frame.kind.startswith("intr"):
             return True
     return False
+
+
+def _entry_has_intr_core(entry: "VerbEntry") -> bool:
+    """
+    Return True if the entry has a core intransitive frame.
+
+    We treat ``intr_pp`` as its own family because those frames can be noisy for
+    otherwise transitive lemmas. Some callers only need to distinguish whether a
+    lemma is explicitly ``intr`` vs. has a direct-object frame.
+    """
+    for frame in entry.frames:
+        if frame.kind == "intr":
+            return True
+    return False
+
+
+def _entry_has_trans(entry: "VerbEntry") -> bool:
+    """
+    Return True if the entry has a core transitive frame.
+
+    Note: we intentionally treat ``ditrans*`` separately; for some uses we only
+    want to avoid lemmas that are explicitly both intransitive and transitive.
+    """
+    for frame in entry.frames:
+        if frame.kind == "trans" or (frame.kind and frame.kind.startswith("trans")):
+            return True
+    return False
+
+
+@lru_cache(maxsize=8192)
+def _wn_pos_counts_cached(lemma: str, lexicon: str) -> Tuple[int, int, int, int]:
+    """
+    Return (verb_synsets, noun_synsets, adj_synsets, adv_synsets) for the lemma.
+    """
+    norm = (lemma or "").strip().lower()
+    if not norm:
+        return (0, 0, 0)
+    try:
+        v = len(wn.synsets(norm, pos="v", lexicon=lexicon))
+    except Exception:
+        v = 0
+    try:
+        n = len(wn.synsets(norm, pos="n", lexicon=lexicon))
+    except Exception:
+        n = 0
+    try:
+        a = len(wn.synsets(norm, pos="a", lexicon=lexicon))
+    except Exception:
+        a = 0
+    try:
+        r = len(wn.synsets(norm, pos="r", lexicon=lexicon))
+    except Exception:
+        r = 0
+    return (v, n, a, r)
+
+
+_PARTICLE_KEYWORDS = {
+    "about",
+    "across",
+    "ahead",
+    "along",
+    "around",
+    "aside",
+    "away",
+    "back",
+    "by",
+    "down",
+    "in",
+    "off",
+    "on",
+    "out",
+    "over",
+    "round",
+    "through",
+    "together",
+    "under",
+    "up",
+}
+
+
+def _verb_share_wordnet(lemma: str, lexicon: str) -> float:
+    v, n, a, r = _wn_pos_counts_cached(lemma, lexicon)
+    total = v + n + a + r
+    if total <= 0:
+        return 1.0
+    return v / total
+
+
+def wordnet_pos_counts(lemma: str, *, lexicon: str = "oewn:2021") -> Tuple[int, int, int, int]:
+    """
+    Return (v, n, a, r) synset counts for the lemma in the given WordNet lexicon.
+    """
+    return _wn_pos_counts_cached((lemma or "").strip().lower(), lexicon)
 
 
 @dataclass(frozen=True)
@@ -196,24 +293,32 @@ class VerbInventory:
             with_particle = [
                 (entry, frame)
                 for entry, frame in filtered
-                if frame.particle is None or frame.particle.lower() == particle_lower
+                if (
+                    (frame.kind and frame.kind.endswith("_particle") and frame.particle and frame.particle.lower() == particle_lower)
+                    or (not (frame.kind and frame.kind.endswith("_particle")) and (frame.particle is None or frame.particle.lower() == particle_lower))
+                )
             ]
             if not with_particle:
                 return None
             filtered = with_particle
 
-        if restrict_transitivity == "intr_only":
-            filtered = [
-                (entry, frame)
-                for entry, frame in filtered
-                if not _entry_has_transitive_like(entry)
-            ]
-        elif restrict_transitivity == "trans_only":
-            filtered = [
-                (entry, frame)
-                for entry, frame in filtered
-                if _entry_has_transitive_like(entry) and not _entry_has_intr(entry)
-            ]
+        # Transitivity restrictions are used by argument-structure subtasks to preserve
+        # violations like "intransitive verb + direct object". For these modes, we only
+        # enforce mutual exclusivity between core transitive ("trans*") and core
+        # intransitive ("intr") frames; other frame families (e.g., intr_pp, ditrans*)
+        # are allowed.
+        if restrict_transitivity in {"intr_only", "trans_only"}:
+            next_filtered = []
+            for entry, frame in filtered:
+                no_trans = not _entry_has_trans(entry)
+                no_intr = not _entry_has_intr_core(entry)
+                if restrict_transitivity == "intr_only":
+                    if no_trans:
+                        next_filtered.append((entry, frame))
+                elif restrict_transitivity == "trans_only":
+                    if no_intr:
+                        next_filtered.append((entry, frame))
+            filtered = next_filtered
         return filtered
 
     def sample(
@@ -226,8 +331,15 @@ class VerbInventory:
         zipf_weighted: bool = False,
         zipf_temp: float = 1.0,
         restrict_transitivity: Optional[str] = None,
+        prefer_verb_lemmas: bool = True,
+        min_verb_share: float = 0.75,
+        verbiness_lexicon: str = "oewn:2021",
     ) -> Optional[Tuple[VerbEntry, VerbFrameSpec]]:
         choices = self.choices_for_frame(kind)
+        if not choices and kind and kind.endswith("_particle"):
+            # If the inventory lacks explicit phrasal-verb frames, avoid guessing
+            # compatibility: failing is safer than producing "escape up"-type swaps.
+            return None
         if not choices:
             return None
         filtered = self._filter_choices(
@@ -240,6 +352,53 @@ class VerbInventory:
             return None
         if filtered:
             choices = filtered
+
+        if prefer_verb_lemmas and choices:
+            # Wordfreq Zipf scores are not POS-specific, so for avoiding
+            # denominal/deadjectival-looking "verbs" we rely on WordNet POS
+            # ambiguity. In practice, many problematic replacements are cases
+            # where a lemma has a weak verb entry but is strongly nominal or
+            # adverbial (e.g., "winter", "weekend", "further").
+            #
+            # Heuristic: prefer lemmas that (a) have a verb entry, (b) are not
+            # primarily nominal/adverbial, and (c) have at least 2 verb synsets
+            # when they are also attested as nouns (to reduce denominal one-off
+            # verb entries).
+            try:
+                noun_ratio_thr = float(min_verb_share)
+            except Exception:
+                noun_ratio_thr = 0.7
+            noun_ratio_thr = max(0.0, noun_ratio_thr)
+
+            def _passes(entry: VerbEntry, *, noun_ratio_thr: float) -> bool:
+                v, n, a, r = _wn_pos_counts_cached(entry.lemma, verbiness_lexicon)
+                if v <= 0:
+                    return False
+                # Suppress denominal one-off verb entries when the lemma is also
+                # a noun: require multiple verb synsets.
+                if n > 0 and v < 3:
+                    return False
+                if v / (n + 1) < noun_ratio_thr:
+                    return False
+                if v / (r + 1) < 1.0:
+                    return False
+                if v / (a + 1) < 1.0:
+                    return False
+                return True
+
+            filtered_verby = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=noun_ratio_thr)]
+            if not filtered_verby and noun_ratio_thr > 0.6:
+                # Relax slightly when the caller requested a very strict ratio.
+                filtered_verby = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=0.6)]
+            if filtered_verby:
+                choices = filtered_verby
+            else:
+                # If the ratio threshold eliminates everything, still apply the
+                # non-denominal/adverbial guards so we avoid obvious non-verbs.
+                fallback = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=0.0)]
+                if fallback:
+                    choices = fallback
+
         if not zipf_weighted or len(choices) == 1:
             return rng.choice(choices)
         weights = []
@@ -265,16 +424,23 @@ class VerbInventory:
         entry = self.entry_for_lemma(lemma)
         if entry is None:
             return (False, False)
-        return (_entry_has_transitive_like(entry), _entry_has_intr(entry))
+        return (_entry_has_trans(entry), _entry_has_intr_core(entry))
 
-    def filter_by_zipf(self, zipf_thr: Optional[float]) -> "VerbInventory":
-        if zipf_thr is None:
+    def filter_by_zipf(
+        self,
+        zipf_thr: Optional[float],
+        *,
+        zipf_min: Optional[float] = None,
+    ) -> "VerbInventory":
+        if zipf_thr is None and zipf_min is None:
             return self
-        filtered = [
-            entry
-            for entry in self._entries
-            if is_rare_lemma(entry.lemma, zipf_thr)
-        ]
+        filtered = []
+        for entry in self._entries:
+            if zipf_thr is not None and not is_rare_lemma(entry.lemma, zipf_thr):
+                continue
+            if zipf_min is not None and _zipf_freq_cached(entry.lemma) < zipf_min:
+                continue
+            filtered.append(entry)
         return VerbInventory(filtered)
 
     def restrict_to(self, lemmas: Iterable[str]) -> "VerbInventory":
@@ -292,7 +458,14 @@ def _parse_frame(entry: Dict) -> Optional[VerbFrameSpec]:
     prep = entry.get("prep")
     if raw_kind.endswith("_pp") and prep is None:
         prep = entry.get("preposition")
-    return VerbFrameSpec(kind=raw_kind, prep=prep, particle=None, separable=False)
+    particle = entry.get("particle")
+    separable = bool(entry.get("separable"))
+    return VerbFrameSpec(
+        kind=raw_kind,
+        prep=_safe_lower(prep),
+        particle=_safe_lower(particle),
+        separable=separable,
+    )
 
 
 def _filter_transitivity_with_wordnet(
@@ -519,10 +692,38 @@ def _collect_verbnet_frames(
             if not norm:
                 continue
             # Skip multiword / hyphenated lemmas; current pipeline doesn't handle them cleanly.
-            if " " in norm or "_" in norm or "-" in norm:
+            if " " in norm or "-" in norm:
                 continue
-            lst = lemma_frames.setdefault(norm, [])
-            lst.extend(specs)
+
+            lemma_key = norm
+            member_particle = None
+            if "_" in norm:
+                # VerbNet encodes many phrasal verbs as <base>_<particle> (e.g., "wake_up").
+                # Convert those to explicit *_particle frames attached to the base lemma.
+                parts = [p for p in norm.split("_") if p]
+                if len(parts) == 2 and all(p.isalpha() for p in parts):
+                    base, particle = parts
+                    if particle in _PARTICLE_KEYWORDS:
+                        lemma_key = base
+                        member_particle = particle
+                if member_particle is None:
+                    continue
+
+            lst = lemma_frames.setdefault(lemma_key, [])
+            if member_particle is None:
+                lst.extend(specs)
+            else:
+                for spec in specs:
+                    if spec.prep:
+                        continue
+                    lst.append(
+                        VerbFrameSpec(
+                            kind=f"{spec.kind}_particle",
+                            prep=None,
+                            particle=member_particle,
+                            separable=False,
+                        )
+                    )
 
     deduped: Dict[str, List[VerbFrameSpec]] = {}
     for lemma, frames in lemma_frames.items():
@@ -657,7 +858,7 @@ def build_inventory_from_verbnet(
     for lemma, frames in frames_by_lemma.items():
         if not frames:
             continue
-        # Skip multiword/underscore lemmas unless we can support particles (current parser does not).
+        # Skip multiword/underscore lemmas; VerbNet phrasal verbs are normalized earlier.
         if "_" in lemma or " " in lemma:
             continue
         entries.append(VerbEntry(lemma=lemma, frames=tuple(frames), metadata={"source": "verbnet"}))

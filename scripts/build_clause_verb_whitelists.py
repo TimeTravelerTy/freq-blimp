@@ -26,7 +26,7 @@ def _is_ok_lemma(lemma: str, inventory_lemmas: Set[str]) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build clause-embedding verb whitelists from COCA marker counts CSV.")
     ap.add_argument("--csv", default="results/coca_clause_markers/verb_clause_marker_counts.csv")
-    ap.add_argument("--inventory", default="data/processed/verb_inventory_pruned.json")
+    ap.add_argument("--inventory", default="data/processed/verb_inventory_pruned_particles.json")
     ap.add_argument("--out", default="data/processed/clause_verb_whitelists.json")
     ap.add_argument(
         "--blocklist",

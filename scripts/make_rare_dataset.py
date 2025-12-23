@@ -1,4 +1,4 @@
-import os, sys, time
+import os, sys, time, random
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import argparse, json
 from pathlib import Path
@@ -8,7 +8,7 @@ from src.lemma_bank import (
     sample_rare_nouns_from_oewn,
     sample_rare_adjectives_from_oewn,
 )
-from src.verb_inventory import load_verb_inventory
+from src.verb_inventory import VerbInventory, load_verb_inventory
 
 def _fmt_zipf(val) -> str:
     if val is None:
@@ -18,29 +18,47 @@ def _fmt_zipf(val) -> str:
     except Exception:
         return "unknown"
 
+def _fmt_zipf_window(zipf_max, zipf_min) -> str:
+    max_part = _fmt_zipf(zipf_max)
+    if zipf_min is None:
+        return max_part
+    min_part = _fmt_zipf(zipf_min)
+    return f"{min_part}-{max_part}"
+
 def _apply_zipf_overrides(args):
     """
     Apply global zipf fallback while keeping per-POS overrides.
     """
     default_zipf = 3.4
     global_zipf = args.zipf_all
+    global_zipf_min = args.zipf_min_all
 
-    def _pick(val):
+    def _pick_max(val):
         if val is not None:
             return val
         if global_zipf is not None:
             return global_zipf
         return default_zipf
 
-    args.zipf = _pick(args.zipf)
-    args.adj_zipf = _pick(args.adj_zipf)
-    args.verb_zipf = _pick(args.verb_zipf)
+    def _pick_min(val):
+        if val is not None:
+            return val
+        if global_zipf_min is not None:
+            return global_zipf_min
+        return None
+
+    args.zipf = _pick_max(args.zipf)
+    args.adj_zipf = _pick_max(args.adj_zipf)
+    args.verb_zipf = _pick_max(args.verb_zipf)
+    args.oewn_zipf_min = _pick_min(args.oewn_zipf_min)
+    args.adj_oewn_zipf_min = _pick_min(args.adj_oewn_zipf_min)
+    args.verb_zipf_min = _pick_min(args.verb_zipf_min)
 
 def _default_out_path(args) -> Path:
     ts = time.strftime("%Y%m%d-%H%M%S")
-    zipf_part = f"zipf{_fmt_zipf(args.zipf)}"
-    adj_part = f"adj{_fmt_zipf(args.adj_zipf)}"
-    verb_part = f"verb{_fmt_zipf(args.verb_zipf)}"
+    zipf_part = f"zipf{_fmt_zipf_window(args.zipf, args.oewn_zipf_min)}"
+    adj_part = f"adj{_fmt_zipf_window(args.adj_zipf, args.adj_oewn_zipf_min)}"
+    verb_part = f"verb{_fmt_zipf_window(args.verb_zipf, args.verb_zipf_min)}"
     name = f"{ts}_rare_blimp_{zipf_part}_{adj_part}_{verb_part}.jsonl"
     return Path("data") / "processed" / name
 
@@ -67,6 +85,7 @@ if __name__ == "__main__":
     ap.add_argument("--verb_mode", choices=["all","k"], default="k")
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--zipf_all", type=float, default=3.4, help="Set a single Zipf threshold for nouns/adjectives/verbs (overridden by per-POS flags).")
+    ap.add_argument("--zipf_min_all", type=float, default=None, help="Set a single Zipf lower bound for nouns/adjectives/verbs (overridden by per-POS flags).")
     ap.add_argument("--zipf", type=float, default=None)
     ap.add_argument("--rare_lemmas", default="[]")  # JSON list
     ap.add_argument("--adj_zipf", type=float, default=None)
@@ -77,7 +96,7 @@ if __name__ == "__main__":
     ap.add_argument("--lemma_source", choices=["manual", "oewn"], default="oewn")
     ap.add_argument("--adj_lemma_source", choices=["manual", "oewn"], default="oewn")
     ap.add_argument("--verb_lemma_source", choices=["manual"], default="manual")
-    ap.add_argument("--verb_inventory", default="data/processed/verb_inventory_pruned.json")
+    ap.add_argument("--verb_inventory", default="data/processed/verb_inventory_pruned_particles.json")
     ap.add_argument("--oewn_lexicon", default="oewn:2021")
     ap.add_argument("--oewn_zipf_min", type=float, default=None)
     ap.add_argument("--oewn_min_len", type=int, default=3)
@@ -86,13 +105,21 @@ if __name__ == "__main__":
     ap.add_argument("--adj_oewn_zipf_min", type=float, default=None)
     ap.add_argument("--adj_oewn_min_len", type=int, default=3)
     ap.add_argument("--adj_oewn_limit", type=int, default=None)
+    ap.add_argument("--verb_zipf_min", type=float, default=None, help="Lower bound for verb Zipf filtering when sampling from an inventory.")
+    ap.add_argument("--verb_limit", type=int, default=None, help="Limit the number of verb inventory entries (randomized by --seed).")
+    ap.add_argument(
+        "--verb_min_verb_share",
+        type=float,
+        default=1.0,
+        help="Minimum WordNet verb-vs-noun ratio (v/(n+1)) when sampling verb lemmas (filters denominal/deadjectival-looking replacements).",
+    )
     ap.add_argument("--spacy_n_process", type=int, default=1, help="spaCy n_process for parsing.")
     ap.add_argument("--spacy_batch_size", type=int, default=128, help="spaCy pipe batch size.")
     ap.add_argument("--gender_lexicon", default="data/processed/wiktionary_gender_lemmas.json")
     ap.add_argument(
         "--zipf_weighted_sampling",
         action="store_true",
-        default=True,
+        default=False,
         help="Bias noun/adj/verb sampling toward lemmas with higher Zipf scores within the allowed range.",
     )
     ap.add_argument(
@@ -100,6 +127,18 @@ if __name__ == "__main__":
         type=float,
         default=1.0,
         help="Temperature for Zipf-weighted sampling (1.0=Zipf-proportional, >1 softens).",
+    )
+    ap.add_argument(
+        "--exclude_proper_nouns",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Exclude proper-noun instances (WordNet 'instance' nouns) from noun swaps.",
+    )
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit the number of output items (pairs) written to the dataset.",
     )
     args = ap.parse_args()
 
@@ -122,7 +161,10 @@ if __name__ == "__main__":
             )
         except LemmaBankError as exc:
             ap.error(str(exc))
-        print(f"[LemmaBank] Loaded {len(rare)} OEWN noun lemmas (zipf < {args.zipf}).")
+        if args.oewn_zipf_min is not None:
+            print(f"[LemmaBank] Loaded {len(rare)} OEWN noun lemmas ({args.oewn_zipf_min} <= zipf < {args.zipf}).")
+        else:
+            print(f"[LemmaBank] Loaded {len(rare)} OEWN noun lemmas (zipf < {args.zipf}).")
 
     rare_adj = json.loads(args.rare_adj_lemmas) if args.rare_adj_lemmas else []
     rare_verbs = json.loads(args.rare_verb_lemmas) if args.rare_verb_lemmas else []
@@ -139,7 +181,10 @@ if __name__ == "__main__":
                 )
             except LemmaBankError as exc:
                 ap.error(str(exc))
-            print(f"[LemmaBank] Loaded {len(rare_adj)} OEWN adjective lemmas (zipf < {args.adj_zipf}).")
+            if args.adj_oewn_zipf_min is not None:
+                print(f"[LemmaBank] Loaded {len(rare_adj)} OEWN adjective lemmas ({args.adj_oewn_zipf_min} <= zipf < {args.adj_zipf}).")
+            else:
+                print(f"[LemmaBank] Loaded {len(rare_adj)} OEWN adjective lemmas (zipf < {args.adj_zipf}).")
 
     verb_inventory_obj = None
     if wants_verbs:
@@ -150,6 +195,16 @@ if __name__ == "__main__":
         print(f"[VerbInventory] Loaded verb inventory ({len(verb_inventory_obj.entries)} entries) from {inv_path}.")
         if verb_inventory_obj.is_empty():
             ap.error("Verb inventory is empty; provide a populated inventory JSON.")
+        if args.verb_limit is not None:
+            try:
+                limit = max(0, int(args.verb_limit))
+            except Exception:
+                limit = 0
+            if limit and len(verb_inventory_obj.entries) > limit:
+                rng = random.Random(args.seed)
+                entries = list(verb_inventory_obj.entries)
+                rng.shuffle(entries)
+                verb_inventory_obj = VerbInventory(tuple(entries[:limit]))
 
     out_path = Path(args.out) if args.out else _default_out_path(args)
     print(f"[Build] Writing rare BLiMP data to {out_path}")
@@ -161,8 +216,12 @@ if __name__ == "__main__":
                 rare_adj_lemmas=rare_adj, swap_targets=args.swap_targets,
                 verb_mode=args.verb_mode, verb_zipf_thr=args.verb_zipf,
                 rare_verb_lemmas=rare_verbs,
+                verb_zipf_min=args.verb_zipf_min,
+                verb_min_verb_share=args.verb_min_verb_share,
                 verb_inventory=verb_inventory_obj,
                 seed=args.seed,
+                record_limit=args.limit,
+                exclude_proper_nouns=args.exclude_proper_nouns,
                 gender_lexicon_path=args.gender_lexicon,
                 zipf_weighted_sampling=args.zipf_weighted_sampling,
                 zipf_temp=args.zipf_temp,
