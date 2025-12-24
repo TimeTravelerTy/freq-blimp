@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import sys
+import time
+from pathlib import Path
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -92,6 +94,26 @@ def _print_stats(title: str, stats: Dict[str, Dict[str, int]]) -> None:
     for key, bucket in sorted(stats.items(), key=lambda kv: (-kv[1]["total"], kv[0])):
         acc = _accuracy(bucket)
         print(f"  {key}: acc={acc:.4f} ({bucket['correct']}/{bucket['total']})")
+
+
+def _model_slug(model: str) -> str:
+    return model.split("/")[-1].replace(".", "_")
+
+
+def _data_slug(data: Optional[str], hf_config: Optional[str]) -> str:
+    if hf_config:
+        return hf_config
+    if data:
+        return Path(data).name.rsplit(".", 1)[0]
+    return "blimp"
+
+
+def _default_out_path(model: str, data: Optional[str], hf_config: Optional[str], variant: str) -> Path:
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    model_slug = _model_slug(model)
+    data_slug = _data_slug(data, hf_config)
+    name = f"{ts}_{model_slug}_{data_slug}_{variant}_accuracy.json"
+    return Path("results") / "blimp_accuracy_runs" / name
 
 
 def main() -> None:
@@ -230,23 +252,26 @@ def main() -> None:
     _print_stats("By subtask", by_subtask)
     _print_stats("By phenomenon|subtask", by_pair)
 
-    if args.output:
-        out = {
-            "model": args.model,
-            "variant": args.variant,
-            "good_field": good_field,
-            "bad_field": bad_field,
-            "phenomenon_field": phenomenon_field,
-            "subtask_field": subtask_field,
-            "overall": overall,
-            "by_phenomenon": by_phenomenon,
-            "by_subtask": by_subtask,
-            "by_phenomenon_subtask": by_pair,
-            "skipped": skipped,
-        }
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-        with open(args.output, "w", encoding="utf-8") as f:
-            json.dump(out, f, indent=2, sort_keys=True)
+    out = {
+        "model": args.model,
+        "variant": args.variant,
+        "good_field": good_field,
+        "bad_field": bad_field,
+        "phenomenon_field": phenomenon_field,
+        "subtask_field": subtask_field,
+        "overall": overall,
+        "by_phenomenon": by_phenomenon,
+        "by_subtask": by_subtask,
+        "by_phenomenon_subtask": by_pair,
+        "skipped": skipped,
+    }
+    out_path = Path(args.output) if args.output else _default_out_path(
+        args.model, args.data, args.hf_config, args.variant
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(out, f, indent=2, sort_keys=True)
+    print(f"\nSaved metrics to {out_path}")
 
 
 if __name__ == "__main__":
