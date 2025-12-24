@@ -2,6 +2,11 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 import torch
+
+try:  # pragma: no cover
+    from tqdm import tqdm
+except ModuleNotFoundError:  # pragma: no cover
+    tqdm = None
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -77,14 +82,21 @@ class LlamaNLLScorer:
                 pass
 
     def score_texts(
-        self, texts: Sequence[str], batch_size: int = 8, max_length: Optional[int] = 256
+        self,
+        texts: Sequence[str],
+        batch_size: int = 8,
+        max_length: Optional[int] = 256,
+        show_progress: bool = False,
     ) -> List[SequenceScore]:
         results: List[SequenceScore] = []
         if not texts:
             return results
         # Enable autocast on CUDA/MPS; stay in full precision elsewhere.
         use_amp = self.device.type in {"cuda", "mps"}
-        for batch in _chunked(texts, batch_size):
+        batches = list(_chunked(texts, batch_size))
+        if show_progress and tqdm is not None:
+            batches = tqdm(batches, desc="Scoring", unit="batch")
+        for batch in batches:
             encoded = self.tokenizer(
                 list(batch),
                 return_tensors="pt",

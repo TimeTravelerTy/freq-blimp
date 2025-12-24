@@ -199,7 +199,10 @@ def main() -> None:
     )
 
     scores = scorer.score_texts(
-        texts, batch_size=args.batch_size, max_length=args.max_length
+        texts,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        show_progress=True,
     )
     if len(scores) != len(texts):
         raise RuntimeError("Scoring returned a different number of results.")
