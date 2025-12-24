@@ -252,6 +252,20 @@ def main() -> None:
     _print_stats("By subtask", by_subtask)
     _print_stats("By phenomenon|subtask", by_pair)
 
+    def _to_rows(stats: Dict[str, Dict[str, int]]) -> List[dict]:
+        rows = []
+        for key, bucket in stats.items():
+            rows.append(
+                {
+                    "key": key,
+                    "accuracy": _accuracy(bucket),
+                    "correct": bucket["correct"],
+                    "total": bucket["total"],
+                }
+            )
+        rows.sort(key=lambda r: (-r["accuracy"], -r["total"], r["key"]))
+        return rows
+
     out = {
         "model": args.model,
         "variant": args.variant,
@@ -259,10 +273,12 @@ def main() -> None:
         "bad_field": bad_field,
         "phenomenon_field": phenomenon_field,
         "subtask_field": subtask_field,
-        "overall": overall,
-        "by_phenomenon": by_phenomenon,
-        "by_subtask": by_subtask,
-        "by_phenomenon_subtask": by_pair,
+        "overall_accuracy": _accuracy(overall),
+        "overall_correct": overall["correct"],
+        "overall_total": overall["total"],
+        "by_phenomenon": _to_rows(by_phenomenon),
+        "by_subtask": _to_rows(by_subtask),
+        "by_phenomenon_subtask": _to_rows(by_pair),
         "skipped": skipped,
     }
     out_path = Path(args.output) if args.output else _default_out_path(
@@ -270,7 +286,7 @@ def main() -> None:
     )
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, sort_keys=True)
+        json.dump(out, f, indent=2)
     print(f"\nSaved metrics to {out_path}")
 
 
