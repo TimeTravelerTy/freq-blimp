@@ -92,7 +92,7 @@ def main() -> None:
         help="Which sentence variant to score when both are present (default: rare).",
     )
     ap.add_argument("--model", default="meta-llama/Meta-Llama-3-8B")
-    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--max-length", type=int, default=256)
     ap.add_argument("--device", default=None)
     ap.add_argument("--dtype", default="auto", choices=["auto", "float16", "bfloat16", "float32"])
