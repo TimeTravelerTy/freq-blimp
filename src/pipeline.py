@@ -1,6 +1,8 @@
 import random, spacy, yaml, time
 from typing import Optional
 from pathlib import Path
+from spacy.lang.en.stop_words import STOP_WORDS as _STOP_WORDS
+from wordfreq import zipf_frequency
 from .io import load_blimp, write_jsonl
 from .becl import load_becl_tsv
 from .quantifier import load_quant_rules, requirement
@@ -223,6 +225,20 @@ def _prepare_lemma_pool(candidates, zipf_thr=None, *, skip_acronyms=True):
     return tuple(filtered)
 
 
+def _noun_dominant(lemma: str, *, lexicon: str = "oewn:2021") -> bool:
+    v, n, a, r = wordnet_pos_counts(lemma, lexicon=lexicon)
+    if n <= 0:
+        return False
+    if n < max(v, a, r):
+        return False
+    if (v + a + r) == 0:
+        if n == 1:
+            return False
+        if n <= 2 and zipf_frequency(lemma, "en") >= 4.8:
+            return False
+    return True
+
+
 def _required_gender(token, reflexive_meta, gender_lex):
     info = reflexive_meta.get(token.i) if isinstance(reflexive_meta, dict) else None
     if info:
@@ -362,6 +378,14 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
 
     if do_noun_swaps:
         pool = _prepare_lemma_pool(rare_lemmas, zipf_thr)
+        if pool:
+            pool_no_stop = tuple(lemma for lemma in pool if lemma not in _STOP_WORDS)
+            if pool_no_stop:
+                pool = pool_no_stop
+        if pool:
+            noun_dominant_pool = tuple(lemma for lemma in pool if _noun_dominant(lemma))
+            if noun_dominant_pool:
+                pool = noun_dominant_pool
         rare_pool = tuple(
             lemma
             for lemma in pool

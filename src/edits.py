@@ -61,6 +61,63 @@ _OBJ_DEPS = {"dobj", "obj"}
 _IOBJ_DEPS = {"iobj", "dative"}
 _PREP_DEPS = {"prep"}
 _PARTICLE_DEPS = {"prt"}
+_MASS_NOUN_STOPLIST = {
+    "advice",
+    "air",
+    "art",
+    "baggage",
+    "bread",
+    "butter",
+    "cash",
+    "cheese",
+    "clothing",
+    "coffee",
+    "courage",
+    "data",
+    "equipment",
+    "evidence",
+    "fish",
+    "flour",
+    "food",
+    "fun",
+    "furniture",
+    "gas",
+    "gold",
+    "grain",
+    "grass",
+    "hair",
+    "happiness",
+    "homework",
+    "honey",
+    "information",
+    "knowledge",
+    "labor",
+    "luggage",
+    "machinery",
+    "meat",
+    "milk",
+    "money",
+    "music",
+    "news",
+    "oil",
+    "paper",
+    "progress",
+    "rain",
+    "rice",
+    "research",
+    "salt",
+    "sand",
+    "software",
+    "sugar",
+    "tea",
+    "traffic",
+    "travel",
+    "water",
+    "weather",
+    "wine",
+    "wood",
+    "work",
+}
 
 # Common phrasal-verb particles that spaCy may tag as `prt` or `advmod`.
 _PARTICLE_WORDS = {
@@ -622,9 +679,20 @@ def _prepare_pools(
     becl_map,
 ):
     rare_tuple_raw = rare_lemmas if isinstance(rare_lemmas, tuple) else tuple(rare_lemmas)
-    person_tuple = ()
+    person_tuple_raw = ()
     if rare_person_lemmas:
-        person_tuple = rare_person_lemmas if isinstance(rare_person_lemmas, tuple) else tuple(rare_person_lemmas)
+        person_tuple_raw = rare_person_lemmas if isinstance(rare_person_lemmas, tuple) else tuple(rare_person_lemmas)
+
+    key = (
+        req,
+        rare_tuple_raw,
+        person_tuple_raw,
+        zipf_thr,
+        id(becl_map) if becl_map is not None else None,
+    )
+    cached = _POOL_CACHE.get(key)
+    if cached is not None:
+        return cached
 
     # Normalize noun lemmas (avoid plural bases like "leaders") and de-dupe.
     def _norm_dedupe(items):
@@ -639,8 +707,7 @@ def _prepare_pools(
         return tuple(out)
 
     rare_tuple = _norm_dedupe(rare_tuple_raw)
-    if person_tuple:
-        person_tuple = _norm_dedupe(person_tuple)
+    person_tuple = _norm_dedupe(person_tuple_raw) if person_tuple_raw else ()
 
     # Avoid noun replacements that are primarily verbs (e.g., "led" as a noun
     # replacement even though it's far more common as a verb form).
@@ -678,17 +745,6 @@ def _prepare_pools(
         if person_filtered:
             person_tuple = person_filtered
 
-    key = (
-        req,
-        rare_tuple,
-        person_tuple,
-        zipf_thr,
-        id(becl_map) if becl_map is not None else None,
-    )
-    cached = _POOL_CACHE.get(key)
-    if cached is not None:
-        return cached
-
     if zipf_thr is None:
         pool = list(rare_tuple)
         pool_person = list(person_tuple)
@@ -707,6 +763,8 @@ def _prepare_pools(
     if req == "COUNT":
         filtered = []
         for w in pool:
+            if w in _MASS_NOUN_STOPLIST:
+                continue
             cls = _becl_class(w)
             if _is_countable_lemma(w, cls):
                 filtered.append(w)
@@ -714,6 +772,8 @@ def _prepare_pools(
 
         filtered_person = []
         for w in pool_person:
+            if w in _MASS_NOUN_STOPLIST:
+                continue
             cls = _becl_class(w)
             if _is_countable_lemma(w, cls):
                 filtered_person.append(w)

@@ -8,6 +8,7 @@ import wn
 from wordfreq import zipf_frequency
 
 from .lemma_bank import sample_rare_verbs_from_oewn
+from .inflect import inflect_verb
 from .rarity import is_rare_lemma
 import xml.etree.ElementTree as ET
 
@@ -16,6 +17,23 @@ import xml.etree.ElementTree as ET
 def _zipf_freq_cached(lemma: str) -> float:
     try:
         return zipf_frequency(lemma or "", "en")
+    except Exception:
+        return 0.0
+
+
+@lru_cache(maxsize=8192)
+def _inflected_zipf_cached(lemma: str) -> float:
+    if not lemma:
+        return 0.0
+    forms = []
+    for tag in ("VBD", "VBG"):
+        form = inflect_verb(lemma, tag)
+        if form:
+            forms.append(form)
+    if not forms:
+        return 0.0
+    try:
+        return min(zipf_frequency(form, "en") for form in forms)
     except Exception:
         return 0.0
 
@@ -249,6 +267,7 @@ class VerbInventory:
         self._frame_index = frame_index
         self._lookup_index = lookup_index
         self._lemma_index = lemma_index
+        self._choice_cache: Dict[Tuple, Tuple[Tuple[VerbEntry, VerbFrameSpec], ...]] = {}
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -321,6 +340,83 @@ class VerbInventory:
             filtered = next_filtered
         return filtered
 
+    def _filtered_choices(
+        self,
+        kind: str,
+        *,
+        desired_prep: Optional[str],
+        desired_particle: Optional[str],
+        restrict_transitivity: Optional[str],
+        prefer_verb_lemmas: bool,
+        min_verb_share: float,
+        verbiness_lexicon: str,
+    ) -> Optional[Tuple[Tuple[VerbEntry, VerbFrameSpec], ...]]:
+        key = (
+            kind,
+            desired_prep.lower() if desired_prep else None,
+            desired_particle.lower() if desired_particle else None,
+            restrict_transitivity,
+            bool(prefer_verb_lemmas),
+            float(min_verb_share),
+            verbiness_lexicon,
+        )
+        cached = self._choice_cache.get(key)
+        if cached is not None:
+            return cached or None
+
+        choices = self.choices_for_frame(kind)
+        if not choices:
+            self._choice_cache[key] = tuple()
+            return None
+        filtered = self._filter_choices(
+            choices,
+            desired_prep=desired_prep,
+            desired_particle=desired_particle,
+            restrict_transitivity=restrict_transitivity,
+        )
+        if filtered is None:
+            self._choice_cache[key] = tuple()
+            return None
+        if filtered:
+            choices = filtered
+
+        if prefer_verb_lemmas and choices:
+            try:
+                noun_ratio_thr = float(min_verb_share)
+            except Exception:
+                noun_ratio_thr = 0.7
+            noun_ratio_thr = max(0.0, noun_ratio_thr)
+
+            def _passes(entry: VerbEntry, *, noun_ratio_thr: float) -> bool:
+                v, n, a, r = _wn_pos_counts_cached(entry.lemma, verbiness_lexicon)
+                if v <= 0:
+                    return False
+                if n >= 3 or a >= 3 or r >= 3:
+                    return False
+                if n > 0 and v < 3:
+                    return False
+                if v / (n + 1) < noun_ratio_thr:
+                    return False
+                if v / (r + 1) < 1.0:
+                    return False
+                if v / (a + 1) < 1.0:
+                    return False
+                return True
+
+            filtered_verby = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=noun_ratio_thr)]
+            if not filtered_verby and noun_ratio_thr > 0.6:
+                filtered_verby = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=0.6)]
+            if filtered_verby:
+                choices = filtered_verby
+            else:
+                fallback = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=0.0)]
+                if fallback:
+                    choices = fallback
+
+        cached_tuple = tuple(choices)
+        self._choice_cache[key] = cached_tuple
+        return cached_tuple
+
     def sample(
         self,
         kind: str,
@@ -335,69 +431,21 @@ class VerbInventory:
         min_verb_share: float = 0.75,
         verbiness_lexicon: str = "oewn:2021",
     ) -> Optional[Tuple[VerbEntry, VerbFrameSpec]]:
-        choices = self.choices_for_frame(kind)
-        if not choices and kind and kind.endswith("_particle"):
+        if not self.choices_for_frame(kind) and kind and kind.endswith("_particle"):
             # If the inventory lacks explicit phrasal-verb frames, avoid guessing
             # compatibility: failing is safer than producing "escape up"-type swaps.
             return None
-        if not choices:
-            return None
-        filtered = self._filter_choices(
-            choices,
+        choices = self._filtered_choices(
+            kind,
             desired_prep=desired_prep,
             desired_particle=desired_particle,
             restrict_transitivity=restrict_transitivity,
+            prefer_verb_lemmas=prefer_verb_lemmas,
+            min_verb_share=min_verb_share,
+            verbiness_lexicon=verbiness_lexicon,
         )
-        if filtered is None:
+        if choices is None:
             return None
-        if filtered:
-            choices = filtered
-
-        if prefer_verb_lemmas and choices:
-            # Wordfreq Zipf scores are not POS-specific, so for avoiding
-            # denominal/deadjectival-looking "verbs" we rely on WordNet POS
-            # ambiguity. In practice, many problematic replacements are cases
-            # where a lemma has a weak verb entry but is strongly nominal or
-            # adverbial (e.g., "winter", "weekend", "further").
-            #
-            # Heuristic: prefer lemmas that (a) have a verb entry, (b) are not
-            # primarily nominal/adverbial, and (c) have at least 2 verb synsets
-            # when they are also attested as nouns (to reduce denominal one-off
-            # verb entries).
-            try:
-                noun_ratio_thr = float(min_verb_share)
-            except Exception:
-                noun_ratio_thr = 0.7
-            noun_ratio_thr = max(0.0, noun_ratio_thr)
-
-            def _passes(entry: VerbEntry, *, noun_ratio_thr: float) -> bool:
-                v, n, a, r = _wn_pos_counts_cached(entry.lemma, verbiness_lexicon)
-                if v <= 0:
-                    return False
-                # Suppress denominal one-off verb entries when the lemma is also
-                # a noun: require multiple verb synsets.
-                if n > 0 and v < 3:
-                    return False
-                if v / (n + 1) < noun_ratio_thr:
-                    return False
-                if v / (r + 1) < 1.0:
-                    return False
-                if v / (a + 1) < 1.0:
-                    return False
-                return True
-
-            filtered_verby = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=noun_ratio_thr)]
-            if not filtered_verby and noun_ratio_thr > 0.6:
-                # Relax slightly when the caller requested a very strict ratio.
-                filtered_verby = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=0.6)]
-            if filtered_verby:
-                choices = filtered_verby
-            else:
-                # If the ratio threshold eliminates everything, still apply the
-                # non-denominal/adverbial guards so we avoid obvious non-verbs.
-                fallback = [(entry, frame) for entry, frame in choices if _passes(entry, noun_ratio_thr=0.0)]
-                if fallback:
-                    choices = fallback
 
         if not zipf_weighted or len(choices) == 1:
             return rng.choice(choices)
@@ -440,6 +488,14 @@ class VerbInventory:
                 continue
             if zipf_min is not None and _zipf_freq_cached(entry.lemma) < zipf_min:
                 continue
+            base_zipf = zipf_min if zipf_min is not None else zipf_thr
+            if base_zipf is not None:
+                if zipf_min is not None:
+                    min_required = base_zipf - 0.9
+                else:
+                    min_required = base_zipf - 1.9
+                if _inflected_zipf_cached(entry.lemma) < min_required:
+                    continue
             filtered.append(entry)
         return VerbInventory(filtered)
 
