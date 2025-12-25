@@ -5,9 +5,30 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 
+_TS_RE = re.compile(r"\d{8}-\d{6}")
+
+
 def _parse_timestamp(text: str) -> Optional[str]:
-    m = re.search(r"\d{8}-\d{6}", text)
+    m = _TS_RE.search(text)
     return m.group(0) if m else None
+
+
+def _strip_ts_prefix(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    m = _TS_RE.match(text)
+    if m and text.startswith(f"{m.group(0)}_"):
+        return text[len(m.group(0)) + 1 :]
+    return text
+
+
+def _strip_ts_suffix(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    m = _TS_RE.search(text)
+    if m and text.endswith(f"_{m.group(0)}"):
+        return text[: -(len(m.group(0)) + 1)]
+    return text
 
 
 def _parse_scores_name(path: Path) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
@@ -40,6 +61,8 @@ def _parse_scores_name(path: Path) -> Tuple[Optional[str], Optional[str], Option
             model = "_".join(parts[:-1])
             data = parts[-1]
 
+    model = _strip_ts_suffix(model)
+    data = _strip_ts_prefix(data)
     return model, data, variant, ts
 
 
@@ -152,13 +175,14 @@ def main() -> None:
     bar_width = 0.8 / max(1, len(model_order))
 
     fig, ax = plt.subplots(figsize=(10, 5))
+    label_map = {model: _display_model(model) for model in model_order}
     for i, model in enumerate(model_order):
         offsets = [pos - 0.4 + bar_width / 2 + i * bar_width for pos in group_positions]
         heights = []
         for group in wanted_groups:
             bucket = buckets.get((group, model))
             heights.append(bucket["accuracy"] if bucket else 0.0)
-        ax.bar(offsets, heights, width=bar_width, label=model)
+        ax.bar(offsets, heights, width=bar_width, label=label_map.get(model, model))
 
     ax.set_ylabel("Accuracy")
     ax.set_xticks(group_positions)
@@ -177,3 +201,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+def _display_model(model: str) -> str:
+    return model.replace("_", ".")
