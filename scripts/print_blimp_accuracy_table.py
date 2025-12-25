@@ -164,8 +164,12 @@ def main() -> None:
             parsed_path = Path(obj["scores_path"])
         else:
             parsed_path = obj["_path"]
-        model, data, _variant, ts = _parse_scores_name(parsed_path)
-        group = _group_label(data, parsed_path.stem)
+        model, data, variant, ts = _parse_scores_name(parsed_path)
+        # Use variant if present; otherwise try to infer from data_slug
+        if variant == "original":
+            group = "original dataset"
+        else:
+            group = _group_label(data, parsed_path.stem)
         if not model or group not in wanted_groups:
             continue
         models_found.add(model)
