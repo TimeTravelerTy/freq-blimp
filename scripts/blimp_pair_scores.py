@@ -64,6 +64,105 @@ def _default_out_path(model: str, data: str, variant: str) -> Path:
     return Path("results") / "blimp_pair_scores" / name
 
 
+def _select_fields(variant: str, records: List[dict], good_field: Optional[str], bad_field: Optional[str]):
+    if variant == "original":
+        good_candidates = ["good_original", "sentence_good", "good", "grammatical"]
+        bad_candidates = ["bad_original", "sentence_bad", "bad", "ungrammatical"]
+    elif variant == "rare":
+        good_candidates = ["good_rare", "sentence_good", "good", "grammatical"]
+        bad_candidates = ["bad_rare", "sentence_bad", "bad", "ungrammatical"]
+    else:
+        good_candidates = [
+            "good_rare",
+            "good_original",
+            "sentence_good",
+            "good",
+            "grammatical",
+        ]
+        bad_candidates = [
+            "bad_rare",
+            "bad_original",
+            "sentence_bad",
+            "bad",
+            "ungrammatical",
+        ]
+
+    picked_good = _pick_field(records, good_field, good_candidates)
+    picked_bad = _pick_field(records, bad_field, bad_candidates)
+    if not picked_good or not picked_bad:
+        raise ValueError(
+            "Could not infer good/bad fields; set --good-field and --bad-field."
+        )
+    return picked_good, picked_bad
+
+
+def _write_variant(
+    scorer: LlamaNLLScorer,
+    variant: str,
+    records: List[dict],
+    good_field: Optional[str],
+    bad_field: Optional[str],
+    args,
+) -> Path:
+    picked_good, picked_bad = _select_fields(variant, records, good_field, bad_field)
+    texts: List[str] = []
+    items: List[dict] = []
+    skipped = 0
+    for rec in records:
+        good = rec.get(picked_good)
+        bad = rec.get(picked_bad)
+        if not isinstance(good, str) or not isinstance(bad, str):
+            skipped += 1
+            continue
+        texts.append(good)
+        texts.append(bad)
+        items.append(rec)
+
+    if not texts:
+        raise ValueError("No valid good/bad pairs found.")
+
+    scores = scorer.score_texts(
+        texts,
+        batch_size=args.batch_size,
+        max_length=args.max_length,
+        show_progress=True,
+    )
+    if len(scores) != len(texts):
+        raise RuntimeError("Scoring returned a different number of results.")
+
+    out_path = Path(args.output) if args.output else _default_out_path(
+        args.model, args.data, variant
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        for i, rec in enumerate(items):
+            meta = rec.get("meta") if isinstance(rec.get("meta"), dict) else {}
+            good_score = scores[2 * i]
+            bad_score = scores[2 * i + 1]
+            row = {
+                "idx": rec.get("idx"),
+                "group": rec.get("group"),
+                "phenomenon": rec.get("phenomenon"),
+                "subtask": rec.get("subtask"),
+                "variant": variant,
+                "good_field": picked_good,
+                "bad_field": picked_bad,
+                "good_text": rec.get(picked_good),
+                "bad_text": rec.get(picked_bad),
+                "good_total_nll": good_score.total_nll,
+                "bad_total_nll": bad_score.total_nll,
+                "good_token_count": good_score.token_count,
+                "bad_token_count": bad_score.token_count,
+                "swap_counts": _swap_counts(meta),
+            }
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    print(f"Saved {variant} pair scores to {out_path}")
+    if skipped:
+        print(f"Skipped {skipped} records with missing good/bad text for {variant}.")
+    return out_path
+
+
 def _swap_counts(meta: dict) -> Dict[str, int]:
     def _len(key: str) -> int:
         val = meta.get(key)
@@ -87,9 +186,9 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="Optional limit on records.")
     ap.add_argument(
         "--variant",
-        default="rare",
-        choices=["rare", "original", "auto"],
-        help="Which sentence variant to score when both are present (default: rare).",
+        default="both",
+        choices=["rare", "original", "auto", "both"],
+        help="Which sentence variant to score when both are present (default: both).",
     )
     ap.add_argument("--model", default="meta-llama/Meta-Llama-3-8B")
     ap.add_argument("--batch-size", type=int, default=32)
@@ -112,51 +211,6 @@ def main() -> None:
     if not records:
         raise ValueError("No records loaded.")
 
-    if args.variant == "original":
-        good_candidates = ["good_original", "sentence_good", "good", "grammatical"]
-        bad_candidates = ["bad_original", "sentence_bad", "bad", "ungrammatical"]
-    elif args.variant == "rare":
-        good_candidates = ["good_rare", "sentence_good", "good", "grammatical"]
-        bad_candidates = ["bad_rare", "sentence_bad", "bad", "ungrammatical"]
-    else:
-        good_candidates = [
-            "good_rare",
-            "good_original",
-            "sentence_good",
-            "good",
-            "grammatical",
-        ]
-        bad_candidates = [
-            "bad_rare",
-            "bad_original",
-            "sentence_bad",
-            "bad",
-            "ungrammatical",
-        ]
-
-    good_field = _pick_field(records, args.good_field, good_candidates)
-    bad_field = _pick_field(records, args.bad_field, bad_candidates)
-    if not good_field or not bad_field:
-        raise ValueError(
-            "Could not infer good/bad fields; set --good-field and --bad-field."
-        )
-
-    texts: List[str] = []
-    items: List[dict] = []
-    skipped = 0
-    for rec in records:
-        good = rec.get(good_field)
-        bad = rec.get(bad_field)
-        if not isinstance(good, str) or not isinstance(bad, str):
-            skipped += 1
-            continue
-        texts.append(good)
-        texts.append(bad)
-        items.append(rec)
-
-    if not texts:
-        raise ValueError("No valid good/bad pairs found.")
-
     scorer = LlamaNLLScorer(
         model_name=args.model,
         device=args.device,
@@ -165,45 +219,13 @@ def main() -> None:
         compile_model=args.compile_model,
     )
 
-    scores = scorer.score_texts(
-        texts,
-        batch_size=args.batch_size,
-        max_length=args.max_length,
-        show_progress=True,
-    )
-    if len(scores) != len(texts):
-        raise RuntimeError("Scoring returned a different number of results.")
-
-    out_path = Path(args.output) if args.output else _default_out_path(
-        args.model, args.data, args.variant
-    )
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    with out_path.open("w", encoding="utf-8") as f:
-        for i, rec in enumerate(items):
-            meta = rec.get("meta") if isinstance(rec.get("meta"), dict) else {}
-            good_score = scores[2 * i]
-            bad_score = scores[2 * i + 1]
-            row = {
-                "idx": rec.get("idx"),
-                "group": rec.get("group"),
-                "phenomenon": rec.get("phenomenon"),
-                "subtask": rec.get("subtask"),
-                "variant": args.variant,
-                "good_field": good_field,
-                "bad_field": bad_field,
-                "good_text": rec.get(good_field),
-                "bad_text": rec.get(bad_field),
-                "good_total_nll": good_score.total_nll,
-                "bad_total_nll": bad_score.total_nll,
-                "good_token_count": good_score.token_count,
-                "bad_token_count": bad_score.token_count,
-                "swap_counts": _swap_counts(meta),
-            }
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    print(f"Saved pair scores to {out_path}")
-    if skipped:
-        print(f"Skipped {skipped} records with missing good/bad text.")
+    if args.variant == "both":
+        if args.output:
+            raise ValueError("--output cannot be used with --variant both.")
+        _write_variant(scorer, "original", records, args.good_field, args.bad_field, args)
+        _write_variant(scorer, "rare", records, args.good_field, args.bad_field, args)
+    else:
+        _write_variant(scorer, args.variant, records, args.good_field, args.bad_field, args)
 
 
 if __name__ == "__main__":
