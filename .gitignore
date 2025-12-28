@@ -25,6 +25,7 @@ data/external/
 data/raw/
 results/
 .cache/
+logs/
 
 # OS
 .DS_Store
@@ -40,6 +41,7 @@ blimp_venv/
 *.bak
 *.tmp
 *.swp
+*.sh
 
 # Jupyter
 .ipynb_checkpoints/
