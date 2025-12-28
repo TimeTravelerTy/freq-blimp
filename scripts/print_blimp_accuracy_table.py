@@ -89,7 +89,7 @@ def _group_label(data_slug: Optional[str], stem: str) -> Optional[str]:
             high = m.group("high").replace("_", ".")
             window = f"{low}-{high}"
             mapping = {
-                "4.0-5.2": "4.0-5.2: head",
+                "3.6-5.0": "3.6-5.0: head",
                 "2.2-3.0": "2.2-3.0: tail",
                 "1.2-2.0": "1.2-2.0: xtail",
             }
@@ -103,7 +103,7 @@ def _group_label(data_slug: Optional[str], stem: str) -> Optional[str]:
         high = m.group("high").replace("_", ".")
         window = f"{low}-{high}"
         mapping = {
-            "4.0-5.2": "4.0-5.2: head",
+            "3.6-5.0": "3.6-5.0: head",
             "2.2-3.0": "2.2-3.0: tail",
             "1.2-2.0": "1.2-2.0: xtail",
         }
@@ -149,7 +149,7 @@ def main() -> None:
 
     wanted_groups = [
         "original dataset",
-        "4.0-5.2: head",
+        "3.6-5.0: head",
         "2.2-3.0: tail",
         "1.2-2.0: xtail",
     ]
