@@ -17,12 +17,17 @@ build/
 .vscode/
 
 # Data & outputs
-*.jsonl
-*.tsv
-*.csv
-data/processed/
-data/external/
 data/raw/
+data/external/*
+!data/external/becl_lemma.tsv
+data/processed/*
+!data/processed/verb_inventory_pruned_particles.json
+!data/processed/clause_verb_whitelists.json
+!data/processed/clause_verb_blocklist.json
+!data/processed/freq_blimp_xtail_zipf1_2-2_0_generated.jsonl
+!data/processed/freq_blimp_tail_zipf2_2-3_0_generated.jsonl
+!data/processed/freq_blimp_head_zipf3_6-5_0_generated.jsonl
+!data/processed/blimp_original.jsonl
 results/
 .cache/
 logs/

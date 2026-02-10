@@ -38,65 +38,34 @@ def _extract_words_from_swaps(
         w = s.get(which)
         if isinstance(w, str) and w:
             words.append(w)
-
-        prep = s.get(f"prep_{which}")
-        if isinstance(prep, str) and prep:
-            words.append(prep)
-
-        particle = s.get(f"particle_{which}")
-        if isinstance(particle, str) and particle:
-            words.append(particle)
     return words
 
 
-def _extract_object_words_from_swaps(
-    swap_items: Iterable[Dict[str, Any]],
-    *,
-    which: str,
-) -> List[str]:
-    """
-    Extract one token per swap "object".
-
-    This intentionally ignores auxiliary tokens like prepositions/particles so a
-    phrasal verb swap counts as a single swapped item rather than 2–3 positions.
-    """
-    words: List[str] = []
-    for s in swap_items:
-        w = s.get(which)
-        if isinstance(w, str) and w:
-            words.append(w)
-    return words
+def _all_swaps(meta: Dict[str, Any], prefix: str) -> List[Dict[str, Any]]:
+    swaps = list(meta.get(f"{prefix}_swaps") or [])
+    # Backward compatibility for legacy records with split POS keys.
+    swaps.extend(meta.get(f"{prefix}_adj_swaps") or [])
+    swaps.extend(meta.get(f"{prefix}_verb_swaps") or [])
+    return swaps
 
 
 def add_zipf_aggregates(record: Dict[str, Any]) -> Dict[str, Any]:
     meta = record.get("meta") or {}
 
-    g_swaps = list(meta.get("g_swaps") or [])
-    b_swaps = list(meta.get("b_swaps") or [])
-    g_adj_swaps = list(meta.get("g_adj_swaps") or [])
-    b_adj_swaps = list(meta.get("b_adj_swaps") or [])
-    g_verb_swaps = list(meta.get("g_verb_swaps") or [])
-    b_verb_swaps = list(meta.get("b_verb_swaps") or [])
+    g_swaps = _all_swaps(meta, "g")
+    b_swaps = _all_swaps(meta, "b")
 
     good_original_words = (
         _extract_words_from_swaps(g_swaps, which="old")
-        + _extract_words_from_swaps(g_adj_swaps, which="old")
-        + _extract_words_from_swaps(g_verb_swaps, which="old")
     )
     bad_original_words = (
         _extract_words_from_swaps(b_swaps, which="old")
-        + _extract_words_from_swaps(b_adj_swaps, which="old")
-        + _extract_words_from_swaps(b_verb_swaps, which="old")
     )
     good_rare_words = (
         _extract_words_from_swaps(g_swaps, which="new")
-        + _extract_words_from_swaps(g_adj_swaps, which="new")
-        + _extract_words_from_swaps(g_verb_swaps, which="new")
     )
     bad_rare_words = (
         _extract_words_from_swaps(b_swaps, which="new")
-        + _extract_words_from_swaps(b_adj_swaps, which="new")
-        + _extract_words_from_swaps(b_verb_swaps, which="new")
     )
 
     zipf_values = {
@@ -123,51 +92,6 @@ def add_zipf_aggregates(record: Dict[str, Any]) -> Dict[str, Any]:
     meta_out = dict(meta)
     meta_out["zipf_swapped_position_aggregates"] = aggs
     meta_out["zipf_swapped_position_deltas"] = deltas
-
-    # Object-level aggregates: count one Zipf sample per swap object (noun/adj/verb),
-    # rather than per modified token position.
-    good_original_obj_words = (
-        _extract_object_words_from_swaps(g_swaps, which="old")
-        + _extract_object_words_from_swaps(g_adj_swaps, which="old")
-        + _extract_object_words_from_swaps(g_verb_swaps, which="old")
-    )
-    bad_original_obj_words = (
-        _extract_object_words_from_swaps(b_swaps, which="old")
-        + _extract_object_words_from_swaps(b_adj_swaps, which="old")
-        + _extract_object_words_from_swaps(b_verb_swaps, which="old")
-    )
-    good_rare_obj_words = (
-        _extract_object_words_from_swaps(g_swaps, which="new")
-        + _extract_object_words_from_swaps(g_adj_swaps, which="new")
-        + _extract_object_words_from_swaps(g_verb_swaps, which="new")
-    )
-    bad_rare_obj_words = (
-        _extract_object_words_from_swaps(b_swaps, which="new")
-        + _extract_object_words_from_swaps(b_adj_swaps, which="new")
-        + _extract_object_words_from_swaps(b_verb_swaps, which="new")
-    )
-
-    zipf_obj_values = {
-        "good_original": [_zipf(w) for w in good_original_obj_words],
-        "bad_original": [_zipf(w) for w in bad_original_obj_words],
-        "good_rare": [_zipf(w) for w in good_rare_obj_words],
-        "bad_rare": [_zipf(w) for w in bad_rare_obj_words],
-    }
-    obj_aggs = {k: _values_to_aggs(v) for k, v in zipf_obj_values.items()}
-    obj_deltas = {
-        "good_rare_minus_original": {
-            "mean": _delta(obj_aggs["good_rare"]["mean"], obj_aggs["good_original"]["mean"]),
-            "median": _delta(obj_aggs["good_rare"]["median"], obj_aggs["good_original"]["median"]),
-            "min": _delta(obj_aggs["good_rare"]["min"], obj_aggs["good_original"]["min"]),
-        },
-        "bad_rare_minus_original": {
-            "mean": _delta(obj_aggs["bad_rare"]["mean"], obj_aggs["bad_original"]["mean"]),
-            "median": _delta(obj_aggs["bad_rare"]["median"], obj_aggs["bad_original"]["median"]),
-            "min": _delta(obj_aggs["bad_rare"]["min"], obj_aggs["bad_original"]["min"]),
-        },
-    }
-    meta_out["zipf_swapped_object_aggregates"] = obj_aggs
-    meta_out["zipf_swapped_object_deltas"] = obj_deltas
 
     out = dict(record)
     out["meta"] = meta_out

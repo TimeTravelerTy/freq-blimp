@@ -110,17 +110,17 @@ def _default_out_path(
 
 
 def _swap_counts(meta: dict) -> Dict[str, int]:
-    def _len(key: str) -> int:
-        val = meta.get(key)
-        return len(val) if isinstance(val, list) else 0
+    def _count(prefix: str) -> int:
+        total = 0
+        for key in (f"{prefix}_swaps", f"{prefix}_adj_swaps", f"{prefix}_verb_swaps"):
+            val = meta.get(key)
+            if isinstance(val, list):
+                total += len(val)
+        return total
 
     return {
-        "g_swaps": _len("g_swaps"),
-        "b_swaps": _len("b_swaps"),
-        "g_verb_swaps": _len("g_verb_swaps"),
-        "b_verb_swaps": _len("b_verb_swaps"),
-        "g_adj_swaps": _len("g_adj_swaps"),
-        "b_adj_swaps": _len("b_adj_swaps"),
+        "g_swaps": _count("g"),
+        "b_swaps": _count("b"),
     }
 
 
@@ -175,7 +175,6 @@ def _write_variant(
             bad_score = scores[2 * i + 1]
             row = {
                 "idx": rec.get("idx"),
-                "group": rec.get("group"),
                 "phenomenon": rec.get("phenomenon"),
                 "subtask": rec.get("subtask"),
                 "field": rec.get("field"),
@@ -196,6 +195,24 @@ def _write_variant(
     if skipped:
         print(f"[Warn] Skipped {skipped} records with missing good/bad text for {variant}.")
     return out_path
+
+
+def _variant_has_pairs(
+    variant: str,
+    records: List[dict],
+    good_field: Optional[str],
+    bad_field: Optional[str],
+) -> bool:
+    try:
+        picked_good, picked_bad = _select_fields(variant, records, good_field, bad_field)
+    except ValueError:
+        return False
+    for rec in records:
+        good = rec.get(picked_good)
+        bad = rec.get(picked_bad)
+        if isinstance(good, str) and isinstance(bad, str):
+            return True
+    return False
 
 
 def _collect_paths(data_dir: Path, timestamp: Optional[str], pattern: Optional[str]) -> List[Path]:
@@ -258,9 +275,9 @@ def main() -> None:
     )
     ap.add_argument(
         "--variant",
-        default="rare",
+        default="auto",
         choices=["rare", "original", "auto", "both"],
-        help="Which sentence variant to score (default: rare).",
+        help="Which sentence variant to score. 'auto' resolves from available fields (default: auto).",
     )
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--max-length", type=int, default=256)
@@ -285,6 +302,16 @@ def main() -> None:
         default="results/blimp_pair_scores",
         help="Output directory for pair score JSONL files.",
     )
+    ap.add_argument(
+        "--run-timestamp",
+        default=None,
+        help="Override run timestamp used in output filenames (default: now).",
+    )
+    ap.add_argument(
+        "--manifest-out",
+        default=None,
+        help="Optional JSON path to write completed output file paths.",
+    )
     ap.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs.")
     args = ap.parse_args()
 
@@ -297,7 +324,7 @@ def main() -> None:
     paths = _collect_paths(data_dir, args.timestamp, args.pattern)
     models = _parse_models(args.models)
     out_dir = Path(args.out_dir)
-    run_ts = time.strftime("%Y%m%d-%H%M%S")
+    run_ts = args.run_timestamp or time.strftime("%Y%m%d-%H%M%S")
 
     completed: List[Path] = []
     for model in models:
@@ -319,23 +346,40 @@ def main() -> None:
             if not records:
                 raise RuntimeError(f"No records loaded from {data_path}")
             if args.variant == "both":
+                wrote_any = False
+                for variant in ("original", "rare"):
+                    if not _variant_has_pairs(variant, records, args.good_field, args.bad_field):
+                        print(f"[Skip] No scorable {variant} pairs found in {data_path}.")
+                        continue
+                    wrote_any = True
+                    out_path = _write_variant(
+                        scorer,
+                        variant,
+                        records,
+                        args.good_field,
+                        args.bad_field,
+                        data_path,
+                        model,
+                        args,
+                        run_ts,
+                        out_dir,
+                    )
+                    if out_path:
+                        completed.append(out_path)
+                if not wrote_any:
+                    print(f"[Skip] No scorable original or rare pairs found in {data_path}.")
+            elif args.variant == "auto":
+                if _variant_has_pairs("rare", records, args.good_field, args.bad_field):
+                    resolved_variant = "rare"
+                elif _variant_has_pairs("original", records, args.good_field, args.bad_field):
+                    resolved_variant = "original"
+                else:
+                    print(f"[Skip] No scorable original or rare pairs found in {data_path}.")
+                    continue
+                print(f"[Auto] Resolved variant={resolved_variant} for {data_path.name}")
                 out_path = _write_variant(
                     scorer,
-                    "original",
-                    records,
-                    args.good_field,
-                    args.bad_field,
-                    data_path,
-                    model,
-                    args,
-                    run_ts,
-                    out_dir,
-                )
-                if out_path:
-                    completed.append(out_path)
-                out_path = _write_variant(
-                    scorer,
-                    "rare",
+                    resolved_variant,
                     records,
                     args.good_field,
                     args.bad_field,
@@ -366,6 +410,16 @@ def main() -> None:
     print("\nCompleted runs:")
     for p in completed:
         print(f"  {p}")
+
+    if args.manifest_out:
+        manifest_path = Path(args.manifest_out)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_timestamp": run_ts,
+            "outputs": [str(p) for p in completed],
+        }
+        manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        print(f"\nSaved manifest: {manifest_path}")
 
 
 if __name__ == "__main__":

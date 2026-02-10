@@ -3,7 +3,7 @@ from typing import Optional, Sequence
 from pathlib import Path
 from spacy.lang.en.stop_words import STOP_WORDS as _STOP_WORDS
 from wordfreq import zipf_frequency
-from .io import load_blimp, write_jsonl
+from .io import load_blimp, load_blimp_field_map, write_jsonl
 from .becl import load_becl_tsv
 from .quantifier import load_quant_rules, requirement
 from .edits import (
@@ -65,6 +65,38 @@ def _normalize_blimp_field(value: Optional[str]) -> Optional[str]:
     if val == "syntax_semantics":
         return "syntax/semantics"
     return val
+
+
+_SWAP_KEEP_KEYS = ("i", "old", "new", "tag", "lemma")
+
+
+def _slim_swap_entry(entry, pos_label: str):
+    if not isinstance(entry, dict):
+        return None
+    out = {}
+    for key in _SWAP_KEEP_KEYS:
+        val = entry.get(key)
+        if val is not None:
+            out[key] = val
+    if "old" not in out or "new" not in out:
+        return None
+    out["pos"] = pos_label
+    return out
+
+
+def _merge_and_slim_swaps(noun_swaps, adj_swaps, verb_swaps):
+    merged = []
+    for pos_label, swaps in (
+        ("noun", noun_swaps),
+        ("adjective", adj_swaps),
+        ("verb", verb_swaps),
+    ):
+        for entry in swaps or ():
+            slim = _slim_swap_entry(entry, pos_label)
+            if slim is not None:
+                merged.append(slim)
+    merged.sort(key=lambda it: (it.get("i", -1), it.get("pos", "")))
+    return merged
 
 
 _ACRONYM_VOWELS = set("aeiou")
@@ -594,7 +626,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 spacy_n_process: int = 1,
                 spacy_batch_size: int = 128,
                 match_token_count: bool = False,
-                swap_tokenizer: Optional[str] = None):
+                swap_tokenizer: Optional[str] = None,
+                original_out_path: Optional[Path] = None):
     if record_limit is not None:
         try:
             record_limit = max(0, int(record_limit))
@@ -782,6 +815,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
             continue
         for cfg in configs:
             cfg_list.append((group_name, phenomenon, cfg))
+
+    field_map = load_blimp_field_map(configs=[cfg for _, _, cfg in cfg_list])
 
     total_items = 0
     if record_limit:
@@ -2005,8 +2040,12 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                     swap_failed_reason = "pair_collapsed"
 
                 blimp_field = _normalize_blimp_field(r.get("field"))
+                if blimp_field is None:
+                    blimp_field = field_map.get(cfg)
+
+                g_merged_swaps = _merge_and_slim_swaps(g_swaps, g_adj_swaps, g_verb_swaps)
+                b_merged_swaps = _merge_and_slim_swaps(b_swaps, b_adj_swaps, b_verb_swaps)
                 record = {
-                    "group": group_name,
                     "phenomenon": phenomenon,
                     "subtask": cfg,
                     "field": blimp_field,
@@ -2016,26 +2055,9 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                     "good_rare": good_rare_val,
                     "bad_rare": bad_rare_val,
                     "meta": {
-                        "g_verb_swaps": g_verb_swaps,
-                        "b_verb_swaps": b_verb_swaps,
-                        "g_swaps": g_swaps,
-                        "b_swaps": b_swaps,
-                        "g_adj_swaps": g_adj_swaps,
-                        "b_adj_swaps": b_adj_swaps,
-                        "swap_targets": sorted(swap_targets_set),
-                        "noun_mode": noun_mode,
-                        "adj_mode": adj_mode,
-                        "verb_mode": verb_mode,
-                        "k": k,
-                        "zipf_thr": zipf_thr,
-                        "adj_zipf_thr": adj_zipf_thr,
-                        "verb_zipf_thr": verb_zipf_thr,
-                        "verb_swapped": verb_changed,
-                        "noun_swapped": noun_changed,
-                        "adj_swapped": adj_changed,
-                        "swap_failed_reason": swap_failed_reason,
-                        "req_good": req_g,
-                        "req_bad": req_b
+                        "g_swaps": g_merged_swaps,
+                        "b_swaps": b_merged_swaps,
+                        "swap_failed_reason": swap_failed_reason
                     }
                 }
                 records.append(add_zipf_aggregates(record))
@@ -2048,4 +2070,20 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
         if stop_early:
             break
 
-    write_jsonl(out_path, records)
+    generated_records = []
+    original_records = []
+    for rec in records:
+        generated = dict(rec)
+        generated.pop("good_original", None)
+        generated.pop("bad_original", None)
+        generated_records.append(generated)
+
+        if original_out_path is not None:
+            original = dict(rec)
+            original.pop("good_rare", None)
+            original.pop("bad_rare", None)
+            original_records.append(original)
+
+    write_jsonl(out_path, generated_records)
+    if original_out_path is not None:
+        write_jsonl(original_out_path, original_records)

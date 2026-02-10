@@ -87,6 +87,12 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None, help="Optional limit on number of rows.")
     ap.add_argument("--good-nll-field", default=None, help="Field for good sentence NLL.")
     ap.add_argument("--bad-nll-field", default=None, help="Field for bad sentence NLL.")
+    ap.add_argument(
+        "--normalize-by",
+        default="none",
+        choices=["none", "char", "token"],
+        help="Normalization for NLL comparison: none (raw), char, or token.",
+    )
     ap.add_argument("--phenomenon-field", default=None, help="Field for phenomenon.")
     ap.add_argument("--subtask-field", default=None, help="Field for subtask/config.")
     ap.add_argument("--output", default=None, help="Optional JSON output path for metrics.")
@@ -128,6 +134,23 @@ def main() -> None:
             skipped += 1
             continue
 
+        if args.normalize_by == "char":
+            good_len = len(rec.get("good_text") or "") if isinstance(rec.get("good_text"), str) else 0
+            bad_len = len(rec.get("bad_text") or "") if isinstance(rec.get("bad_text"), str) else 0
+            if good_len <= 0 or bad_len <= 0:
+                skipped += 1
+                continue
+            good_score = good_score / good_len
+            bad_score = bad_score / bad_len
+        elif args.normalize_by == "token":
+            good_len = rec.get("good_token_count")
+            bad_len = rec.get("bad_token_count")
+            if not isinstance(good_len, int) or not isinstance(bad_len, int) or good_len <= 0 or bad_len <= 0:
+                skipped += 1
+                continue
+            good_score = good_score / good_len
+            bad_score = bad_score / bad_len
+
         correct = 1 if good_score < bad_score else 0
         overall["correct"] += correct
         overall["total"] += 1
@@ -152,6 +175,7 @@ def main() -> None:
     out = {
         "scores_path": args.scores,
         "variant": variant,
+        "normalize_by": args.normalize_by,
         "good_nll_field": good_field,
         "bad_nll_field": bad_field,
         "phenomenon_field": phenomenon_field,

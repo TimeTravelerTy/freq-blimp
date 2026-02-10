@@ -121,7 +121,7 @@ def _format_table(rows: List[List[str]]) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Regime diagnostics for rare BLiMP datasets.")
+    ap = argparse.ArgumentParser(description="Regime diagnostics for freq BLiMP datasets.")
     ap.add_argument("--pattern", default="results/blimp_pair_scores/*.jsonl")
     ap.add_argument("--out", default="results/analysis_plots/regime_diagnostics.png")
     ap.add_argument("--out-pdf", default=None, help="Optional PDF output path.")
@@ -207,10 +207,11 @@ def main() -> None:
             continue
         ax_hist.hist(vals, bins=bins, density=True, alpha=0.4, label=regime)
     # ax_hist.set_title("Realised median Zipf per regime")
-    ax_hist.set_xlabel("Median Zipf (swapped lemmas)")
+    ax_hist.set_xlabel("Realised median Zipf")
     ax_hist.set_ylabel("Density")
     ax_hist.legend()
     ax_hist.grid(True, alpha=0.3)
+    ax_hist.invert_xaxis()
 
     shares = []
     for regime in _GROUP_ORDER:
