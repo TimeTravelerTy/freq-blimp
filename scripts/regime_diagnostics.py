@@ -22,7 +22,8 @@ DATA_DIR = Path("data/processed")
 _PAIR_RE = re.compile(
     r"(?:^|/)\d{8}-\d{6}_(?P<model>.+?)_(?P<dataset>\d{8}-\d{6}_.+?)_pair-scores\.jsonl$"
 )
-_ZIPF_RE = re.compile(r"zipf(?P<low>\d+_\d+)-(?P<high>\d+_\d+)")
+_ZIPF_WINDOW_RE = re.compile(r"zipf(?P<low>\d+_\d+)-(?P<high>\d+_\d+)")
+_ZIPF_SINGLE_RE = re.compile(r"zipf(?P<value>\d+_\d+)(?:_|$)")
 
 _WINDOW_TO_GROUP = {
     "4.0-5.2": "head",
@@ -38,19 +39,34 @@ def _parse_pair_scores_path(path: Path) -> Tuple[str, str, str]:
     if not m:
         raise ValueError(f"Unparseable pair-scores filename: {path}")
     dataset_full = m.group("dataset")
-    variant_hint = "original" if dataset_full.endswith("_original") else "rare"
-    dataset_base = re.sub(r"_(original|rare)$", "", dataset_full)
+    variant_hint = "freq"
+    if dataset_full.endswith("_original"):
+        variant_hint = "original"
+    elif dataset_full.endswith("_freq") or dataset_full.endswith("_rare"):
+        variant_hint = "freq"
+    dataset_base = re.sub(r"_(original|freq|rare)$", "", dataset_full)
     return m.group("model"), dataset_base, variant_hint
 
 
 def _group_label(dataset_base: str) -> Optional[str]:
-    m = _ZIPF_RE.search(dataset_base)
+    m = _ZIPF_WINDOW_RE.search(dataset_base)
+    if m:
+        low = m.group("low").replace("_", ".")
+        high = m.group("high").replace("_", ".")
+        window = f"{low}-{high}"
+        return _WINDOW_TO_GROUP.get(window)
+
+    m = _ZIPF_SINGLE_RE.search(dataset_base)
     if not m:
         return None
-    low = m.group("low").replace("_", ".")
-    high = m.group("high").replace("_", ".")
-    window = f"{low}-{high}"
-    return _WINDOW_TO_GROUP.get(window)
+    value = float(m.group("value").replace("_", "."))
+    if 3.6 <= value <= 5.2:
+        return "head"
+    if 2.2 <= value <= 3.0:
+        return "tail"
+    if 1.2 <= value <= 2.0:
+        return "xtail"
+    return None
 
 
 def _load_dataset_meta(dataset_base: str, cache: Dict[str, Dict[str, dict]]) -> Dict[str, dict]:
@@ -159,7 +175,7 @@ def main() -> None:
             continue
         if variant_hint == "original":
             regime = "original"
-        elif variant_hint == "rare":
+        elif variant_hint == "freq":
             regime = _group_label(dataset_base)
         else:
             continue

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 _SCORES_NAME_RE = re.compile(
-    r"^(?P<run>\d{8}-\d{6})_(?P<model>.+?)_(?P<dataset>\d{8}-\d{6}_.+)_(?P<variant>rare|original)$"
+    r"^(?P<run>\d{8}-\d{6})_(?P<model>.+?)_(?P<dataset>\d{8}-\d{6}_.+)_(?P<variant>freq|rare|original)$"
 )
 
 
@@ -59,7 +59,7 @@ def main() -> None:
         ],
         help="Models to evaluate.",
     )
-    ap.add_argument("--variant", default="auto", choices=["rare", "original", "auto", "both"])
+    ap.add_argument("--variant", default="auto", choices=["freq", "rare", "original", "auto", "both"])
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--max-length", type=int, default=256)
     ap.add_argument("--limit", type=int, default=None)

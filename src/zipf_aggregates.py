@@ -22,12 +22,6 @@ def _values_to_aggs(values: List[float]) -> Dict[str, Optional[float]]:
     }
 
 
-def _delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
-    if a is None or b is None:
-        return None
-    return a - b
-
-
 def _extract_words_from_swaps(
     swap_items: Iterable[Dict[str, Any]],
     *,
@@ -61,37 +55,23 @@ def add_zipf_aggregates(record: Dict[str, Any]) -> Dict[str, Any]:
     bad_original_words = (
         _extract_words_from_swaps(b_swaps, which="old")
     )
-    good_rare_words = (
+    good_freq_words = (
         _extract_words_from_swaps(g_swaps, which="new")
     )
-    bad_rare_words = (
+    bad_freq_words = (
         _extract_words_from_swaps(b_swaps, which="new")
     )
 
     zipf_values = {
         "good_original": [_zipf(w) for w in good_original_words],
         "bad_original": [_zipf(w) for w in bad_original_words],
-        "good_rare": [_zipf(w) for w in good_rare_words],
-        "bad_rare": [_zipf(w) for w in bad_rare_words],
+        "good_freq": [_zipf(w) for w in good_freq_words],
+        "bad_freq": [_zipf(w) for w in bad_freq_words],
     }
     aggs = {k: _values_to_aggs(v) for k, v in zipf_values.items()}
 
-    deltas = {
-        "good_rare_minus_original": {
-            "mean": _delta(aggs["good_rare"]["mean"], aggs["good_original"]["mean"]),
-            "median": _delta(aggs["good_rare"]["median"], aggs["good_original"]["median"]),
-            "min": _delta(aggs["good_rare"]["min"], aggs["good_original"]["min"]),
-        },
-        "bad_rare_minus_original": {
-            "mean": _delta(aggs["bad_rare"]["mean"], aggs["bad_original"]["mean"]),
-            "median": _delta(aggs["bad_rare"]["median"], aggs["bad_original"]["median"]),
-            "min": _delta(aggs["bad_rare"]["min"], aggs["bad_original"]["min"]),
-        },
-    }
-
     meta_out = dict(meta)
     meta_out["zipf_swapped_position_aggregates"] = aggs
-    meta_out["zipf_swapped_position_deltas"] = deltas
 
     out = dict(record)
     out["meta"] = meta_out

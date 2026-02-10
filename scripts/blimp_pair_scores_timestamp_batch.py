@@ -60,11 +60,12 @@ def _select_fields(
     if variant == "original":
         good_candidates = ["good_original", "sentence_good", "good", "grammatical"]
         bad_candidates = ["bad_original", "sentence_bad", "bad", "ungrammatical"]
-    elif variant == "rare":
-        good_candidates = ["good_rare", "sentence_good", "good", "grammatical"]
-        bad_candidates = ["bad_rare", "sentence_bad", "bad", "ungrammatical"]
+    elif variant in {"freq", "rare"}:
+        good_candidates = ["good_freq", "good_rare", "sentence_good", "good", "grammatical"]
+        bad_candidates = ["bad_freq", "bad_rare", "sentence_bad", "bad", "ungrammatical"]
     else:
         good_candidates = [
+            "good_freq",
             "good_rare",
             "good_original",
             "sentence_good",
@@ -72,6 +73,7 @@ def _select_fields(
             "grammatical",
         ]
         bad_candidates = [
+            "bad_freq",
             "bad_rare",
             "bad_original",
             "sentence_bad",
@@ -276,7 +278,7 @@ def main() -> None:
     ap.add_argument(
         "--variant",
         default="auto",
-        choices=["rare", "original", "auto", "both"],
+        choices=["freq", "rare", "original", "auto", "both"],
         help="Which sentence variant to score. 'auto' resolves from available fields (default: auto).",
     )
     ap.add_argument("--batch-size", type=int, default=64)
@@ -314,6 +316,9 @@ def main() -> None:
     )
     ap.add_argument("--overwrite", action="store_true", help="Overwrite existing outputs.")
     args = ap.parse_args()
+    if args.variant == "rare":
+        print("[Info] --variant rare is deprecated; using freq naming.")
+        args.variant = "freq"
 
     if LlamaNLLScorer is None:
         raise ModuleNotFoundError(
@@ -347,7 +352,7 @@ def main() -> None:
                 raise RuntimeError(f"No records loaded from {data_path}")
             if args.variant == "both":
                 wrote_any = False
-                for variant in ("original", "rare"):
+                for variant in ("original", "freq"):
                     if not _variant_has_pairs(variant, records, args.good_field, args.bad_field):
                         print(f"[Skip] No scorable {variant} pairs found in {data_path}.")
                         continue
@@ -367,14 +372,14 @@ def main() -> None:
                     if out_path:
                         completed.append(out_path)
                 if not wrote_any:
-                    print(f"[Skip] No scorable original or rare pairs found in {data_path}.")
+                    print(f"[Skip] No scorable original or freq pairs found in {data_path}.")
             elif args.variant == "auto":
-                if _variant_has_pairs("rare", records, args.good_field, args.bad_field):
-                    resolved_variant = "rare"
+                if _variant_has_pairs("freq", records, args.good_field, args.bad_field):
+                    resolved_variant = "freq"
                 elif _variant_has_pairs("original", records, args.good_field, args.bad_field):
                     resolved_variant = "original"
                 else:
-                    print(f"[Skip] No scorable original or rare pairs found in {data_path}.")
+                    print(f"[Skip] No scorable original or freq pairs found in {data_path}.")
                     continue
                 print(f"[Auto] Resolved variant={resolved_variant} for {data_path.name}")
                 out_path = _write_variant(

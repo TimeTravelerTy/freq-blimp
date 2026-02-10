@@ -2014,11 +2014,11 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                             _note_swap_failure("adj_no_candidates")
 
                 if not (verb_changed or noun_changed or adj_changed):
-                    good_rare_val = None
-                    bad_rare_val = None
+                    good_freq_val = None
+                    bad_freq_val = None
                 else:
-                    good_rare_val = g_variant
-                    bad_rare_val = b_variant
+                    good_freq_val = g_variant
+                    bad_freq_val = b_variant
 
                 swap_failed_reason = None
                 if not (verb_changed or noun_changed or adj_changed):
@@ -2026,11 +2026,11 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                         swap_failed_reason = "|".join(swap_failures)
                     else:
                         swap_failed_reason = "no_swap"
-                if good_rare_val and bad_rare_val and good_rare_val == bad_rare_val:
-                    # Rare variants must preserve the good/bad contrast. When swapping
-                    # collapses the pair, drop the rare variants and record the reason.
-                    good_rare_val = None
-                    bad_rare_val = None
+                if good_freq_val and bad_freq_val and good_freq_val == bad_freq_val:
+                    # Frequency-swapped variants must preserve the good/bad contrast.
+                    # When swapping collapses the pair, drop the freq variants.
+                    good_freq_val = None
+                    bad_freq_val = None
                     g_swaps, b_swaps = [], []
                     g_adj_swaps, b_adj_swaps = [], []
                     g_verb_swaps, b_verb_swaps = [], []
@@ -2052,8 +2052,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                     "idx": i,
                     "good_original": g,
                     "bad_original": b,
-                    "good_rare": good_rare_val,
-                    "bad_rare": bad_rare_val,
+                    "good_freq": good_freq_val,
+                    "bad_freq": bad_freq_val,
                     "meta": {
                         "g_swaps": g_merged_swaps,
                         "b_swaps": b_merged_swaps,
@@ -2080,8 +2080,8 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
 
         if original_out_path is not None:
             original = dict(rec)
-            original.pop("good_rare", None)
-            original.pop("bad_rare", None)
+            original.pop("good_freq", None)
+            original.pop("bad_freq", None)
             original_records.append(original)
 
     write_jsonl(out_path, generated_records)

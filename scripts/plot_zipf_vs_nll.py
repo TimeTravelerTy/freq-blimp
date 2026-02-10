@@ -67,14 +67,18 @@ def _ensure_mpl_config(out_dir: Path) -> None:
 def _parse_pair_scores_path(path: Path) -> Tuple[str, str, str]:
     """
     Returns (model, dataset_base, variant_hint)
-    dataset_base strips the trailing _original/_rare suffix.
+    dataset_base strips the trailing _original/_freq/_rare suffix.
     """
     m = _PAIR_RE.search(str(path))
     if not m:
         raise ValueError(f"Unparseable pair-scores filename: {path}")
     dataset_full = m.group("dataset")
-    variant_hint = "original" if dataset_full.endswith("_original") else "rare"
-    dataset_base = re.sub(r"_(original|rare)$", "", dataset_full)
+    variant_hint = "freq"
+    if dataset_full.endswith("_original"):
+        variant_hint = "original"
+    elif dataset_full.endswith("_freq") or dataset_full.endswith("_rare"):
+        variant_hint = "freq"
+    dataset_base = re.sub(r"_(original|freq|rare)$", "", dataset_full)
     return m.group("model"), dataset_base, variant_hint
 
 
@@ -250,7 +254,7 @@ def main() -> None:
         action="store_true",
         help="Normalize NLL by token count (uses good_token_count/bad_token_count).",
     )
-    ap.add_argument("--variant", choices=["rare", "original", "any"], default="any", help="Filter on dataset variant inferred from filename.")
+    ap.add_argument("--variant", choices=["freq", "rare", "original", "any"], default="any", help="Filter on dataset variant inferred from filename.")
     ap.add_argument(
         "--dataset-contains",
         default=None,
@@ -274,6 +278,8 @@ def main() -> None:
         help="Number of quantile bins for swapped_median_zipf (uses pd.qcut).",
     )
     args = ap.parse_args()
+    if args.variant == "rare":
+        args.variant = "freq"
 
     _ensure_mpl_config(Path(args.out).parent)
 
