@@ -69,7 +69,7 @@ def _default_original_path() -> Path:
 
 def _apply_zipf_overrides(args):
     default_zipf = 3.4
-    global_zipf = args.zipf_all
+    global_zipf = args.zipf_max_all
     global_zipf_min = args.zipf_min_all
 
     def _pick_max(val):
@@ -280,7 +280,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--verb_mode", choices=["all", "k"], default="k")
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument(
+        "--zipf_max_all",
         "--zipf_all",
+        dest="zipf_max_all",
         type=float,
         default=3.4,
         help="Set one Zipf threshold for nouns/adjectives/verbs (overridden by per-POS flags).",
@@ -396,9 +398,9 @@ def main() -> None:
         for zipf_min, zipf_max in runs:
             run_args = argparse.Namespace(**vars(args))
             run_args.zipf_min_all = zipf_min
-            run_args.zipf_all = zipf_max
+            run_args.zipf_max_all = zipf_max
             run_args.out = str(_batch_out_path(ts, zipf_max, zipf_min, out_dir))
-            print(f"[Batch] zipf_min_all={zipf_min} zipf_all={zipf_max} -> {run_args.out}")
+            print(f"[Batch] zipf_min_all={zipf_min} zipf_max_all={zipf_max} -> {run_args.out}")
             if args.dry_run:
                 continue
             completed.append(_run_generation(run_args, parser))
