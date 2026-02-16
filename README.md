@@ -1,4 +1,4 @@
-# freq-BLiMP
+# Freq-BLiMP
 
 A pipeline for generating and evaluating **frequency-controlled BLiMP-style minimal pairs**.
 
