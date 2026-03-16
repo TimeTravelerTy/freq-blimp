@@ -201,6 +201,8 @@ _PARTICLE_KEYWORDS = {
     "up",
 }
 
+_DEFAULT_FRAME_BLOCKLIST_PATH = Path("data") / "processed" / "verb_frame_blocklist.json"
+
 
 def _verb_share_wordnet(lemma: str, lexicon: str) -> float:
     v, n, a, r = _wn_pos_counts_cached(lemma, lexicon)
@@ -556,7 +558,86 @@ def _filter_transitivity_with_wordnet(
     return list(wn_frames)
 
 
-def load_verb_inventory(path: Union[str, Path]) -> VerbInventory:
+@lru_cache(maxsize=4)
+def _load_frame_blocklist_cached(path_str: str) -> Dict[str, Tuple[str, ...]]:
+    path = Path(path_str)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    blocked: Dict[str, set[str]] = {}
+
+    def _add(lemma_raw, frames_raw) -> None:
+        lemma = (lemma_raw or "").strip().lower()
+        if not lemma:
+            return
+        if isinstance(frames_raw, str):
+            frames = [frames_raw]
+        else:
+            frames = list(frames_raw or ())
+        norm_frames = {
+            str(frame).strip()
+            for frame in frames
+            if isinstance(frame, str) and str(frame).strip()
+        }
+        if not norm_frames:
+            return
+        blocked.setdefault(lemma, set()).update(norm_frames)
+
+    for item in payload.get("pairs") or ():
+        if not isinstance(item, dict):
+            continue
+        _add(item.get("lemma"), item.get("frames"))
+
+    mapping = payload.get("lemmas")
+    if isinstance(mapping, dict):
+        for lemma, frames in mapping.items():
+            _add(lemma, frames)
+
+    return {lemma: tuple(sorted(frames)) for lemma, frames in blocked.items()}
+
+
+def load_frame_blocklist(
+    path: Union[str, Path] = _DEFAULT_FRAME_BLOCKLIST_PATH,
+) -> Dict[str, Tuple[str, ...]]:
+    return dict(_load_frame_blocklist_cached(str(Path(path))))
+
+
+def _apply_frame_blocklist(
+    entries: Sequence[VerbEntry],
+    *,
+    frame_blocklist_path: Union[str, Path] = _DEFAULT_FRAME_BLOCKLIST_PATH,
+) -> List[VerbEntry]:
+    blocked = load_frame_blocklist(frame_blocklist_path)
+    if not blocked:
+        return list(entries)
+
+    filtered_entries: List[VerbEntry] = []
+    for entry in entries:
+        blocked_frames = set(blocked.get(entry.lemma, ()))
+        if not blocked_frames:
+            filtered_entries.append(entry)
+            continue
+        kept_frames = tuple(frame for frame in entry.frames if frame.kind not in blocked_frames)
+        if not kept_frames:
+            continue
+        if len(kept_frames) == len(entry.frames):
+            filtered_entries.append(entry)
+            continue
+        filtered_entries.append(VerbEntry(lemma=entry.lemma, frames=kept_frames, metadata=dict(entry.metadata)))
+    return filtered_entries
+
+
+def load_verb_inventory(
+    path: Union[str, Path],
+    *,
+    frame_blocklist_path: Union[str, Path] = _DEFAULT_FRAME_BLOCKLIST_PATH,
+) -> VerbInventory:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"Verb inventory '{path}' not found.")
@@ -577,6 +658,7 @@ def load_verb_inventory(path: Union[str, Path]) -> VerbInventory:
         if item.get("notes"):
             metadata["notes"] = str(item["notes"])
         entries.append(VerbEntry(lemma=lemma.strip().lower(), frames=tuple(frames), metadata=metadata))
+    entries = _apply_frame_blocklist(entries, frame_blocklist_path=frame_blocklist_path)
     return VerbInventory(entries)
 
 
@@ -856,6 +938,7 @@ def build_inventory_from_lemmas(
     lemmas: Iterable[str],
     *,
     lexicon: str = "oewn:2021",
+    frame_blocklist_path: Union[str, Path] = _DEFAULT_FRAME_BLOCKLIST_PATH,
 ) -> VerbInventory:
     entries: List[VerbEntry] = []
     seen = set()
@@ -870,6 +953,7 @@ def build_inventory_from_lemmas(
             continue
         entries.append(VerbEntry(lemma=norm, frames=frames, metadata={}))
         seen.add(norm)
+    entries = _apply_frame_blocklist(entries, frame_blocklist_path=frame_blocklist_path)
     return VerbInventory(entries)
 
 
@@ -882,6 +966,7 @@ def build_inventory_from_oewn(
     limit: Optional[int] = None,
     shuffle: bool = True,
     seed: int = 0,
+    frame_blocklist_path: Union[str, Path] = _DEFAULT_FRAME_BLOCKLIST_PATH,
 ) -> VerbInventory:
     lemmas = sample_rare_verbs_from_oewn(
         zipf_max=zipf_max,
@@ -892,13 +977,18 @@ def build_inventory_from_oewn(
         shuffle=shuffle,
         seed=seed,
     )
-    return build_inventory_from_lemmas(lemmas, lexicon=lexicon)
+    return build_inventory_from_lemmas(
+        lemmas,
+        lexicon=lexicon,
+        frame_blocklist_path=frame_blocklist_path,
+    )
 
 
 def build_inventory_from_verbnet(
     verbnet_root: Union[str, Path],
     *,
     transitivity_lexicon: Optional[str] = "oewn:2021",
+    frame_blocklist_path: Union[str, Path] = _DEFAULT_FRAME_BLOCKLIST_PATH,
 ) -> VerbInventory:
     """
     Build a verb inventory from VerbNet frames (preferred for structured subcat info).
@@ -922,4 +1012,5 @@ def build_inventory_from_verbnet(
         raise RuntimeError(
             f"VerbNet inventory is empty from '{verbnet_root}'. Check that verbnet3 is installed and the path is correct."
         )
+    entries = _apply_frame_blocklist(entries, frame_blocklist_path=frame_blocklist_path)
     return VerbInventory(entries)

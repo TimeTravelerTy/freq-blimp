@@ -325,6 +325,59 @@ _FRAME_FAMILY = {
     "intr": ["trans"],
 }
 
+_INDEFINITE_ARTICLE_VOWEL_LETTERS = set("aeiou")
+_AN_INITIAL_LETTERS = set("aefhilmnorsx")
+_AN_PREFIXES = (
+    "heir",
+    "herb",
+    "honest",
+    "honor",
+    "honour",
+    "hour",
+)
+_A_PREFIXES = (
+    "euler",
+    "eul",
+    "euro",
+    "ewe",
+    "eup",
+    "one",
+    "once",
+    "ouija",
+    "ubiq",
+    "uk",
+    "uni",
+    "unif",
+    "unil",
+    "unio",
+    "uniq",
+    "unit",
+    "univ",
+    "use",
+    "user",
+    "usu",
+    "urol",
+    "u.s.",
+    "ufo",
+)
+_CMU_VOWEL_PHONEMES = {
+    "AA",
+    "AE",
+    "AH",
+    "AO",
+    "AW",
+    "AY",
+    "EH",
+    "ER",
+    "EY",
+    "IH",
+    "IY",
+    "OW",
+    "OY",
+    "UH",
+    "UW",
+}
+
 @lru_cache(maxsize=8192)
 def _zipf_freq_cached(lemma: str) -> float:
     try:
@@ -404,6 +457,125 @@ def _weighted_order_by_zipf(pool: List[str], rng: random.Random, max_draws: int 
             if lemma not in seen:
                 ordered.append(lemma)
     return ordered
+
+
+def _base_frame_kind(kind: Optional[str]) -> Optional[str]:
+    if not kind or not isinstance(kind, str):
+        return kind
+    if kind.endswith("_particle"):
+        return kind[: -len("_particle")]
+    return kind
+
+
+def _leading_pronunciation_key(token: str) -> str:
+    if not token:
+        return ""
+    cleaned = []
+    started = False
+    for ch in token.strip():
+        if ch.isalpha() or ch in {".", "-"}:
+            cleaned.append(ch)
+            started = True
+            continue
+        if started:
+            break
+    return "".join(cleaned).strip("-.")
+
+
+def _pronunciation_lookup_candidates(token: str) -> List[str]:
+    key = _leading_pronunciation_key(token)
+    if not key:
+        return []
+    candidates = []
+    primary = key.split("-", 1)[0].strip(".")
+    if primary:
+        candidates.append(primary)
+    if key not in candidates:
+        candidates.append(key)
+    out = []
+    seen = set()
+    for cand in candidates:
+        norm = cand.strip()
+        if not norm:
+            continue
+        lower = norm.lower()
+        if lower in seen:
+            continue
+        seen.add(lower)
+        out.append(norm)
+    return out
+
+
+def _arpabet_starts_with_vowel(phones) -> Optional[bool]:
+    if not phones:
+        return None
+    if isinstance(phones, str):
+        items = phones.split()
+    else:
+        items = list(phones)
+    if not items:
+        return None
+    head = str(items[0]).strip().upper()
+    if not head:
+        return None
+    head = "".join(ch for ch in head if ch.isalpha())
+    if not head:
+        return None
+    return head in _CMU_VOWEL_PHONEMES
+
+
+@lru_cache(maxsize=8192)
+def _pronunciation_starts_with_vowel_sound(token: str) -> Optional[bool]:
+    candidates = _pronunciation_lookup_candidates(token)
+    if not candidates:
+        return None
+
+    try:
+        import pronouncing
+
+        for cand in candidates:
+            phones = pronouncing.phones_for_word(cand.lower())
+            if phones:
+                result = _arpabet_starts_with_vowel(phones[0])
+                if result is not None:
+                    return result
+    except Exception:
+        pass
+
+    try:
+        from nltk.corpus import cmudict
+
+        entries = cmudict.dict()
+        for cand in candidates:
+            phones = entries.get(cand.lower())
+            if phones:
+                result = _arpabet_starts_with_vowel(phones[0])
+                if result is not None:
+                    return result
+    except Exception:
+        pass
+
+    return None
+
+
+def _starts_with_vowel_sound(token: str) -> bool:
+    from_pronunciation = _pronunciation_starts_with_vowel_sound(token)
+    if from_pronunciation is not None:
+        return from_pronunciation
+
+    key = _leading_pronunciation_key(token)
+    if not key:
+        return False
+    letters_only = "".join(ch for ch in key.lower() if ch.isalpha())
+    if not letters_only:
+        return False
+    if key.isupper() and len(letters_only) >= 2:
+        return letters_only[0].lower() in _AN_INITIAL_LETTERS
+    if any(letters_only.startswith(prefix) for prefix in _AN_PREFIXES):
+        return True
+    if any(letters_only.startswith(prefix) for prefix in _A_PREFIXES):
+        return False
+    return letters_only[0] in _INDEFINITE_ARTICLE_VOWEL_LETTERS
 
 def reflexive_subject_indices(doc):
     """
@@ -505,7 +677,6 @@ def _force_pluralish(token) -> bool:
 
 
 def _adjust_indefinite_articles(toks):
-    vowels = set("aeiou")
     for i in range(len(toks) - 1):
         word = toks[i]
         nxt = toks[i + 1]
@@ -514,10 +685,9 @@ def _adjust_indefinite_articles(toks):
         lower = word.lower()
         if lower not in {"a", "an"}:
             continue
-        first = nxt[0].lower()
-        if not first.isalpha():
+        if not any(ch.isalpha() for ch in nxt):
             continue
-        desired = "an" if first in vowels else "a"
+        desired = "an" if _starts_with_vowel_sound(nxt) else "a"
         if lower != desired:
             toks[i] = desired.capitalize() if word[0].isupper() else desired
 
@@ -1965,6 +2135,7 @@ def verb_swap_all(
     for idx, target in enumerate(targets):
         verb_key = _verb_key(target)
         tied_lemma = chosen_by_key.get(verb_key) if override_list is None else None
+        should_drop_particle = bool(target.drop_particle)
 
         if target.has_clausal_complement:
             spec = override_list[idx] if override_list is not None else None
@@ -2047,7 +2218,10 @@ def verb_swap_all(
         forced_kind = None
         forced_restrict = None
         has_trans = has_intr = False
-        if transitivity_inv is not None:
+        # Respect explicit frame enforcement from the pipeline (used by
+        # argument-structure good/bad controls). Auto-correcting based on the
+        # source lemma can otherwise override a forced intransitive target.
+        if transitivity_inv is not None and not target.enforce_transitivity:
             has_trans, has_intr = transitivity_inv.lemma_transitivity(target.lemma)
             target_transitive_like = target.frame_kind.startswith("trans") or target.frame_kind.startswith("ditrans")
             target_intransitive_like = target.frame_kind.startswith("intr")
@@ -2123,6 +2297,13 @@ def verb_swap_all(
                     if lookup:
                         sample = lookup
                         break
+                if sample is None and target.frame_kind and target.frame_kind.endswith("_particle"):
+                    base_kind = _base_frame_kind(frame_kind)
+                    if base_kind and base_kind != frame_kind:
+                        lookup = inventory.lookup(tied_lemma, base_kind)
+                        if lookup:
+                            sample = lookup
+                            should_drop_particle = True
                 if sample is None:
                     return None, [], None
                 if match_token_count:
@@ -2175,14 +2356,10 @@ def verb_swap_all(
                 if sample:
                     break
             if not sample:
-                # Backwards-compat: if the inventory lacks a matching particle frame,
-                # allow other particles in the same frame family; otherwise skip.
-                if (
-                    override_list is None
-                    and forced_targets is None
-                    and target.frame_kind
-                    and target.frame_kind.endswith("_particle")
-                ):
+                # If a particle-verb target cannot be replaced by another particle verb,
+                # fall back to a plain verb in the matching base frame and drop the particle.
+                if target.frame_kind and target.frame_kind.endswith("_particle"):
+                    base_kind = _base_frame_kind(frame_kind)
                     for fk in frame_order:
                         restrict = forced_restrict
                         if restrict is None and target.enforce_transitivity:
@@ -2190,8 +2367,11 @@ def verb_swap_all(
                                 restrict = "intr_only"
                             elif fk.startswith("trans") or fk.startswith("ditrans"):
                                 restrict = "trans_only"
+                        base_fk = _base_frame_kind(fk)
+                        if not base_fk or base_fk == fk:
+                            continue
                         sample, saw_mismatch = _select_matching_sample(
-                            fk,
+                            base_fk,
                             desired_prep=prep_text,
                             desired_particle=None,
                             restrict=restrict,
@@ -2199,13 +2379,14 @@ def verb_swap_all(
                         token_mismatch_seen = token_mismatch_seen or saw_mismatch
                         if not sample and prep_text is not None:
                             sample, saw_mismatch = _select_matching_sample(
-                                fk,
+                                base_fk,
                                 desired_prep=None,
                                 desired_particle=None,
                                 restrict=restrict,
                             )
                             token_mismatch_seen = token_mismatch_seen or saw_mismatch
                         if sample:
+                            should_drop_particle = True
                             break
                     if not sample:
                         if match_token_count and token_mismatch_seen:
@@ -2247,7 +2428,7 @@ def verb_swap_all(
 
         particle_old = target.particle_token.text if target.particle_token is not None else None
         particle_new = None
-        if target.drop_particle and target.particle_token is not None:
+        if should_drop_particle and target.particle_token is not None:
             toks[target.particle_token.i] = ""
             particle_new = None
         elif _frame_requires_particle(frame.kind):

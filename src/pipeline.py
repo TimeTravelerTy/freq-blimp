@@ -696,7 +696,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
         n = max(0, int(n))
         if hasattr(dataset, "select"):
             # HuggingFace Datasets: `ds[:n]` returns a column dict, not a Dataset.
-            return dataset.select(range(n))
+            return dataset.select(range(min(n, len(dataset))))
         return dataset[:n]
 
     if do_noun_swaps:
@@ -1148,12 +1148,18 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                         b_entry["enforce_transitivity"] = True
                                     elif cfg in {"inchoative", "intransitive"}:
                                         g_entry["frame"] = _force_frame(g_entry, "intr")
+                                        # The good side must stay genuinely intransitive; otherwise
+                                        # intr->trans fallback can yield objectless transitive verbs.
+                                        g_entry["enforce_transitivity"] = True
                                         b_entry["frame"] = _force_frame(b_entry, "trans")
                                         # The bad side needs exclusivity so the violation (trans w/o dobj)
                                         # stays ungrammatical after swapping.
                                         b_entry["enforce_transitivity"] = True
                                     elif cfg == "drop_argument":
                                         g_entry["frame"] = _force_frame(g_entry, "intr")
+                                        # The grammatical side should never admit a transitive-only
+                                        # lemma once the object has been dropped.
+                                        g_entry["enforce_transitivity"] = True
                                         # If the bad sentence strands a preposition (e.g., "talk to ."),
                                         # keep intr_pp; otherwise force a transitive verb with its object dropped.
                                         b_frame = str(b_entry.get("frame") or "")
