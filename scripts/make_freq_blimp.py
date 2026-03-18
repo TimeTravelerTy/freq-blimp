@@ -206,6 +206,8 @@ def _run_generation(args, parser: argparse.ArgumentParser) -> Path:
         match_token_count=args.match_token_count,
         swap_tokenizer=args.swap_tokenizer,
         original_out_path=(original_out_path if write_original else None),
+        semantic_match=args.semantic_match,
+        semantic_hypernym_depth=args.semantic_hypernym_depth,
     )
     return out_path
 
@@ -367,6 +369,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--swap-tokenizer",
         default=DEFAULT_SWAP_TOKENIZER,
         help=f"Tokenizer name/path for token count matching (default: {DEFAULT_SWAP_TOKENIZER}).",
+    )
+    ap.add_argument(
+        "--semantic-match",
+        dest="semantic_match",
+        choices=["off", "soft", "strict"],
+        default="off",
+        help=(
+            "Semantic class constraint for swapped words. "
+            "'off' = no constraint (default); "
+            "'soft' = prefer semantically similar lemmas, fall back if pool is empty; "
+            "'strict' = drop items where no semantically matching replacement exists."
+        ),
+    )
+    ap.add_argument(
+        "--semantic-hypernym-depth",
+        dest="semantic_hypernym_depth",
+        type=int,
+        default=2,
+        help=(
+            "Number of hypernym levels to climb when finding semantic class for nouns/verbs "
+            "(default: 2). Adjectives use supersense first, falling back to hypernym at this depth."
+        ),
     )
     return ap
 

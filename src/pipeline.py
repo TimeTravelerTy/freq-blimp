@@ -19,6 +19,7 @@ from .edits import (
 from .rarity import is_rare_lemma
 from .lemma_bank import is_person_noun, is_location_noun, is_time_noun, is_proper_noun
 from .gender_lexicon import load_gender_lexicon
+from .semantic_match import SemanticStats, REGIME_OFF
 from .verb_inventory import VerbInventory, load_verb_inventory, wordnet_pos_counts
 from .zipf_aggregates import add_zipf_aggregates
 
@@ -627,7 +628,9 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 spacy_batch_size: int = 128,
                 match_token_count: bool = False,
                 swap_tokenizer: Optional[str] = None,
-                original_out_path: Optional[Path] = None):
+                original_out_path: Optional[Path] = None,
+                semantic_match: str = "off",
+                semantic_hypernym_depth: int = 2):
     if record_limit is not None:
         try:
             record_limit = max(0, int(record_limit))
@@ -689,6 +692,14 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
         "match_token_count": match_token_count,
         "tokenizer_name": swap_tokenizer,
     }
+    semantic_kwargs = {
+        "semantic_match": semantic_match,
+        "semantic_hypernym_depth": semantic_hypernym_depth,
+    }
+    # Combined swap kwargs used by noun_swap_all, adjective_swap_all, verb_swap_all.
+    # verb_swap_from_pool does not support semantic params so keeps token_match_kwargs.
+    _swap_semantic_kwargs = {**token_match_kwargs, **semantic_kwargs}
+    sem_stats = SemanticStats() if semantic_match != "off" else None
 
     def _take_first(dataset, n: int):
         if n is None:
@@ -967,7 +978,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 **verb_sampling_kwargs,
                                 rng=rng_good,
                                 forced_targets=g_forced,
-                                **token_match_kwargs,
+                                **_swap_semantic_kwargs,
                             )
                             verb_attempted = True
                             if _note_swap_reason(g_verb_reason):
@@ -985,7 +996,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 **verb_sampling_kwargs,
                                 rng=rng_bad,
                                 forced_targets=b_forced,
-                                **token_match_kwargs,
+                                **_swap_semantic_kwargs,
                             )
                             verb_attempted = True
                             if _note_swap_reason(b_verb_reason):
@@ -1214,7 +1225,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     **verb_sampling_kwargs,
                                     rng=rng_verbs,
                                     forced_targets=same_g_specs,
-                                    **token_match_kwargs,
+                                    **_swap_semantic_kwargs,
                                 )
                                 verb_attempted = True
                                 if _note_swap_reason(g_same_reason):
@@ -1247,7 +1258,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                             rng=random.Random(pair_seed - 1),
                                             forced_targets=same_b_specs,
                                             override_specs=override_specs,
-                                            **token_match_kwargs,
+                                            **_swap_semantic_kwargs,
                                         )
                                         verb_attempted = True
                                         if _note_swap_reason(b_same_reason):
@@ -1324,7 +1335,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     **verb_sampling_kwargs,
                                     rng=rng_verbs,
                                     forced_targets=g_target_specs,
-                                    **token_match_kwargs,
+                                    **_swap_semantic_kwargs,
                                 )
                                 verb_attempted = True
                                 if _note_swap_reason(g_verb_reason):
@@ -1345,7 +1356,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                         **verb_sampling_kwargs,
                                         rng=random.Random(b_seed),
                                         forced_targets=b_target_specs,
-                                        **token_match_kwargs,
+                                        **_swap_semantic_kwargs,
                                     )
                                     verb_attempted = True
                                     if _note_swap_reason(b_verb_reason):
@@ -1380,7 +1391,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 **verb_sampling_kwargs,
                                 rng=rng_verbs,
                                 forced_targets=g_target_specs,
-                                **token_match_kwargs,
+                                **_swap_semantic_kwargs,
                             )
                             verb_attempted = True
                             if _note_swap_reason(g_verb_reason):
@@ -1418,7 +1429,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                         rng=random.Random(b_seed),
                                         forced_targets=b_target_specs,
                                         override_specs=override_specs or None,
-                                        **token_match_kwargs,
+                                        **_swap_semantic_kwargs,
                                     )
                                     verb_attempted = True
                                     if _note_swap_reason(b_verb_reason):
@@ -1562,7 +1573,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                             rare_person_lemmas=rare_person_pool,
                             rare_gender_lemmas=rare_gender_map,
                             reflexive_subjects=g_reflexive_subjects,
-                            **token_match_kwargs,
+                            **_swap_semantic_kwargs,
                         )
                         noun_attempted = True
                         if _note_swap_reason(g_noun_reason):
@@ -1583,7 +1594,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     rare_gender_lemmas=rare_gender_map,
                                     override_lemmas=lemmas,
                                     reflexive_subjects=b_reflexive_subjects,
-                                    **token_match_kwargs,
+                                    **_swap_semantic_kwargs,
                                 )
                                 noun_attempted = True
                                 if _note_swap_reason(b_noun_reason):
@@ -1643,7 +1654,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 rare_person_lemmas=rare_person_pool,
                                 rare_gender_lemmas=rare_gender_map,
                                 reflexive_subjects=g_reflexive_subjects,
-                                **token_match_kwargs,
+                                **_swap_semantic_kwargs,
                             )
                             noun_attempted = True
                             if _note_swap_reason(g_noun_reason):
@@ -1661,7 +1672,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     rare_person_lemmas=rare_person_pool,
                                     rare_gender_lemmas=rare_gender_map,
                                     reflexive_subjects=b_reflexive_subjects,
-                                    **token_match_kwargs,
+                                    **_swap_semantic_kwargs,
                                 )
                                 noun_attempted = True
                                 if _note_swap_reason(b_noun_reason):
@@ -1850,7 +1861,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     zipf_temp=zipf_temp,
                                     rng=rng_adj,
                                     forced_targets=g_specs_same,
-                                    **token_match_kwargs,
+                                    **_swap_semantic_kwargs,
                                 )
                                 adj_attempted = True
                                 if _note_swap_reason(g_adj_reason):
@@ -1880,7 +1891,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                             rng=random.Random(pair_seed + 1),
                                             forced_targets=b_specs_same,
                                             override_lemmas=override_lemmas,
-                                            **token_match_kwargs,
+                                            **_swap_semantic_kwargs,
                                         )
                                         adj_attempted = True
                                         if _note_swap_reason(b_adj_reason):
@@ -1913,7 +1924,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                     zipf_temp=zipf_temp,
                                     rng=rng_adj,
                                     forced_targets=g_specs_diff,
-                                    **token_match_kwargs,
+                                    **_swap_semantic_kwargs,
                                 )
                                 adj_attempted = True
                                 if _note_swap_reason(g_adj_reason):
@@ -1931,7 +1942,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                         zipf_temp=zipf_temp,
                                         rng=random.Random(pair_seed + 2),
                                         forced_targets=b_specs_diff,
-                                        **token_match_kwargs,
+                                        **_swap_semantic_kwargs,
                                     )
                                     adj_attempted = True
                                     if _note_swap_reason(b_adj_reason):
@@ -1970,7 +1981,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 zipf_temp=zipf_temp,
                                 rng=rng_adj,
                                 forced_targets=g_target_specs,
-                                **token_match_kwargs,
+                                **_swap_semantic_kwargs,
                             )
                             adj_attempted = True
                             if _note_swap_reason(g_adj_reason):
@@ -1991,7 +2002,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                         rng=random.Random(pair_seed + 1),
                                         forced_targets=b_target_specs,
                                         override_lemmas=adj_lemmas,
-                                        **token_match_kwargs,
+                                        **_swap_semantic_kwargs,
                                     )
                                     adj_attempted = True
                                     if _note_swap_reason(b_adj_reason):
@@ -2049,6 +2060,26 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                 if blimp_field is None:
                     blimp_field = field_map.get(cfg)
 
+                # Collect semantic constraint statistics before slimming strips the regime field.
+                if sem_stats is not None:
+                    for _pos, _slist in (
+                        ("noun", g_swaps), ("noun", b_swaps),
+                        ("adjective", g_adj_swaps), ("adjective", b_adj_swaps),
+                        ("verb", g_verb_swaps), ("verb", b_verb_swaps),
+                    ):
+                        for _sw in (_slist or ()):
+                            _regime = _sw.get("semantic_regime")
+                            if _regime and _regime != REGIME_OFF:
+                                sem_stats.record(_pos, _regime, _sw.get("lemma"))
+                    # Track strict-mode drops from failure reasons
+                    for _reason in (swap_failures or ()):
+                        if _reason == "noun_semantic_no_match":
+                            sem_stats.record_drop("noun")
+                        elif _reason == "adj_semantic_no_match":
+                            sem_stats.record_drop("adjective")
+                        elif _reason == "verb_semantic_no_match":
+                            sem_stats.record_drop("verb")
+
                 g_merged_swaps = _merge_and_slim_swaps(g_swaps, g_adj_swaps, g_verb_swaps)
                 b_merged_swaps = _merge_and_slim_swaps(b_swaps, b_adj_swaps, b_verb_swaps)
                 record = {
@@ -2093,3 +2124,6 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
     write_jsonl(out_path, generated_records)
     if original_out_path is not None:
         write_jsonl(original_out_path, original_records)
+
+    if sem_stats is not None:
+        print(sem_stats.summary())

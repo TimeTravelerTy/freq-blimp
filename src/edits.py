@@ -15,6 +15,13 @@ from .inflect import (
     singularize_noun,
 )
 from .rarity import is_rare_lemma
+from .semantic_match import (
+    apply_noun_semantic_filter,
+    apply_adj_semantic_filter,
+    apply_verb_semantic_filter,
+    REGIME_OFF,
+    REGIME_FALLBACK_UNCONSTRAINED,
+)
 from .verb_inventory import VerbInventory, wordnet_pos_counts
 
 _PARTITIVE_HEADS = {"lot", "lots", "bunch", "number", "couple", "plenty"}
@@ -1509,6 +1516,9 @@ def noun_swap_all(
     match_token_count: bool = False,
     tokenizer_name: Optional[str] = None,
     tokenizer=None,
+    semantic_match: str = "off",
+    semantic_hypernym_depth: int = 2,
+    semantic_lexicon: str = "oewn:2021",
 ):
     """
     rare_lemmas: iterable[str] of candidate noun lemmas. If ``zipf_thr`` is None
@@ -1709,6 +1719,16 @@ def noun_swap_all(
                 choice_pool = pool_non_person_checked
             if not choice_pool:
                 return None, [], None
+            # Semantic class constraint: filter choice_pool by WordNet hypernyms
+            semantic_regime = REGIME_OFF
+            if semantic_match != "off":
+                sem_pool, semantic_regime = apply_noun_semantic_filter(
+                    tuple(choice_pool), key, semantic_hypernym_depth, semantic_lexicon
+                )
+                if not sem_pool and semantic_match == "strict":
+                    return None, [], "noun_semantic_no_match"
+                if sem_pool:
+                    choice_pool = list(sem_pool)
             needed_tags = {tag for _, tag, _, _ in group}
             pool_order = (
                 _weighted_order_by_zipf(choice_pool, rng, temp=zipf_temp)
@@ -1739,18 +1759,22 @@ def noun_swap_all(
                 if match_token_count and saw_token_mismatch:
                     return None, [], "noun_no_token_match"
                 return None, [], None
-            chosen_by_key[key] = chosen_lemma
+            chosen_by_key[key] = (chosen_lemma, semantic_regime)
 
         for token, tag, require_person, require_gender in targets:
             key = _noun_key(token)
-            lemma = chosen_by_key.get(key)
-            if not lemma:
+            entry = chosen_by_key.get(key)
+            if not entry:
                 return None, [], None
+            lemma, sem_regime = entry
             form = inflect_noun(lemma, tag)
             if not form:
                 return None, [], None
             old_surface = _apply_noun_form(token, form, toks)
-            swaps.append({"i": token.i, "old": old_surface, "new": form, "tag": tag, "lemma": lemma})
+            swap_rec = {"i": token.i, "old": old_surface, "new": form, "tag": tag, "lemma": lemma}
+            if semantic_match != "off":
+                swap_rec["semantic_regime"] = sem_regime
+            swaps.append(swap_rec)
 
     if not swaps:
         return None, swaps, None
@@ -1785,6 +1809,9 @@ def adjective_swap_all(
     match_token_count: bool = False,
     tokenizer_name: Optional[str] = None,
     tokenizer=None,
+    semantic_match: str = "off",
+    semantic_hypernym_depth: int = 2,
+    semantic_lexicon: str = "oewn:2021",
 ):
     """
     Swap attributive adjectives with rare lemmas.
@@ -1896,7 +1923,18 @@ def adjective_swap_all(
 
         chosen_by_key = {}
         for key, group in groups.items():
-            pool_order = _weighted_order_by_zipf(pool, rng, temp=zipf_temp) if zipf_weighted else list(pool)
+            # Semantic class constraint: filter pool by adjective supersense / hypernym
+            semantic_regime = REGIME_OFF
+            key_pool = pool
+            if semantic_match != "off":
+                sem_pool, semantic_regime = apply_adj_semantic_filter(
+                    tuple(pool), key, semantic_hypernym_depth, semantic_lexicon
+                )
+                if not sem_pool and semantic_match == "strict":
+                    return None, [], "adj_semantic_no_match"
+                if sem_pool:
+                    key_pool = list(sem_pool)
+            pool_order = _weighted_order_by_zipf(key_pool, rng, temp=zipf_temp) if zipf_weighted else list(key_pool)
             if not zipf_weighted:
                 rng.shuffle(pool_order)
             chosen_lemma = None
@@ -1920,18 +1958,22 @@ def adjective_swap_all(
                 if match_token_count and saw_token_mismatch:
                     return None, [], "adj_no_token_match"
                 return None, [], None
-            chosen_by_key[key] = chosen_lemma
+            chosen_by_key[key] = (chosen_lemma, semantic_regime)
 
         for token, tag in targets:
             key = (token.lemma_ or token.text or "").strip().lower()
-            lemma = chosen_by_key.get(key)
-            if not lemma:
+            entry = chosen_by_key.get(key)
+            if not entry:
                 return None, [], None
+            lemma, sem_regime = entry
             surface = _inflect_adj_surface(token, tag, lemma)
             if not surface:
                 return None, [], None
             toks[token.i] = _match_casing(token.text, surface)
-            swaps.append({"i": token.i, "old": token.text, "new": toks[token.i], "tag": tag, "lemma": lemma})
+            swap_rec = {"i": token.i, "old": token.text, "new": toks[token.i], "tag": tag, "lemma": lemma}
+            if semantic_match != "off":
+                swap_rec["semantic_regime"] = sem_regime
+            swaps.append(swap_rec)
 
     if not swaps:
         return None, swaps, None
@@ -2063,6 +2105,9 @@ def verb_swap_all(
     match_token_count: bool = False,
     tokenizer_name: Optional[str] = None,
     tokenizer=None,
+    semantic_match: str = "off",
+    semantic_hypernym_depth: int = 2,
+    semantic_lexicon: str = "oewn:2021",
 ):
     """
     Swap lexical verbs using the precomputed verb inventory.
@@ -2070,6 +2115,8 @@ def verb_swap_all(
     ``zipf_thr`` filters optional that-clause replacements for rarity.
     When ``zipf_weighted`` is True, sampling prefers higher Zipf lemmas
     within the allowed pools.
+    ``semantic_match`` applies VerbNet/WordNet-hypernym class constraints
+    before sampling.
     """
     if rng is None:
         rng = random
@@ -2136,6 +2183,29 @@ def verb_swap_all(
         verb_key = _verb_key(target)
         tied_lemma = chosen_by_key.get(verb_key) if override_list is None else None
         should_drop_particle = bool(target.drop_particle)
+
+        # Semantic class constraint: restrict inventory to VerbNet/hypernym class.
+        # Applied only for free sampling (no override_list, no clausal complement).
+        active_inventory = inventory
+        verb_semantic_regime = REGIME_OFF
+        if (
+            semantic_match != "off"
+            and override_list is None
+            and not target.has_clausal_complement
+            and not tied_lemma
+        ):
+            all_inv_lemmas = tuple(sorted({e.lemma for e in inventory.entries}))
+            sem_lemmas, verb_semantic_regime = apply_verb_semantic_filter(
+                all_inv_lemmas, target.lemma, semantic_hypernym_depth, semantic_lexicon
+            )
+            if sem_lemmas and len(sem_lemmas) < len(all_inv_lemmas):
+                sem_inv = inventory.restrict_to(frozenset(sem_lemmas))
+                if not sem_inv.is_empty():
+                    active_inventory = sem_inv
+                elif semantic_match == "strict":
+                    return None, [], "verb_semantic_no_match"
+                else:
+                    verb_semantic_regime = REGIME_FALLBACK_UNCONSTRAINED
 
         if target.has_clausal_complement:
             spec = override_list[idx] if override_list is not None else None
@@ -2252,10 +2322,11 @@ def verb_swap_all(
             if isinstance(observed, tuple) and observed:
                 observed_kind = observed[0]
 
-            def _select_matching_sample(kind, desired_prep, desired_particle, restrict):
+            def _select_matching_sample(kind, desired_prep, desired_particle, restrict, _inv=None):
+                inv = _inv if _inv is not None else inventory
                 if not match_token_count:
                     return (
-                        inventory.sample(
+                        inv.sample(
                             kind,
                             rng,
                             desired_prep=desired_prep,
@@ -2269,7 +2340,7 @@ def verb_swap_all(
                         ),
                         False,
                     )
-                choices = inventory._filtered_choices(
+                choices = inv._filtered_choices(
                     kind,
                     desired_prep=desired_prep,
                     desired_particle=desired_particle,
@@ -2293,14 +2364,14 @@ def verb_swap_all(
 
             if tied_lemma:
                 for fk in frame_order:
-                    lookup = inventory.lookup(tied_lemma, fk)
+                    lookup = active_inventory.lookup(tied_lemma, fk)
                     if lookup:
                         sample = lookup
                         break
                 if sample is None and target.frame_kind and target.frame_kind.endswith("_particle"):
                     base_kind = _base_frame_kind(frame_kind)
                     if base_kind and base_kind != frame_kind:
-                        lookup = inventory.lookup(tied_lemma, base_kind)
+                        lookup = active_inventory.lookup(tied_lemma, base_kind)
                         if lookup:
                             sample = lookup
                             should_drop_particle = True
@@ -2340,6 +2411,7 @@ def verb_swap_all(
                     desired_prep=prep_text,
                     desired_particle=desired_particle,
                     restrict=restrict,
+                    _inv=active_inventory,
                 )
                 token_mismatch_seen = token_mismatch_seen or saw_mismatch
                 if not sample and prep_text is not None:
@@ -2351,6 +2423,7 @@ def verb_swap_all(
                         desired_prep=None,
                         desired_particle=desired_particle,
                         restrict=restrict,
+                        _inv=active_inventory,
                     )
                     token_mismatch_seen = token_mismatch_seen or saw_mismatch
                 if sample:
@@ -2375,6 +2448,7 @@ def verb_swap_all(
                             desired_prep=prep_text,
                             desired_particle=None,
                             restrict=restrict,
+                            _inv=active_inventory,
                         )
                         token_mismatch_seen = token_mismatch_seen or saw_mismatch
                         if not sample and prep_text is not None:
@@ -2383,6 +2457,7 @@ def verb_swap_all(
                                 desired_prep=None,
                                 desired_particle=None,
                                 restrict=restrict,
+                                _inv=active_inventory,
                             )
                             token_mismatch_seen = token_mismatch_seen or saw_mismatch
                         if sample:
@@ -2444,7 +2519,7 @@ def verb_swap_all(
             toks[particle_token.i] = replacement
             particle_new = replacement
 
-        swaps.append({
+        verb_swap_rec = {
             "i": target.token.i,
             "old": target.token.text,
             "new": toks[target.token.i],
@@ -2457,7 +2532,10 @@ def verb_swap_all(
             "particle_i": target.particle_token.i if target.particle_token is not None else None,
             "particle_old": particle_old,
             "particle_new": particle_new,
-        })
+        }
+        if semantic_match != "off":
+            verb_swap_rec["semantic_regime"] = verb_semantic_regime
+        swaps.append(verb_swap_rec)
 
     if not swaps:
         return None, swaps, None
