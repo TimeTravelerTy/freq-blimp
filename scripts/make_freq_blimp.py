@@ -208,6 +208,7 @@ def _run_generation(args, parser: argparse.ArgumentParser) -> Path:
         original_out_path=(original_out_path if write_original else None),
         semantic_match=args.semantic_match,
         semantic_hypernym_depth=args.semantic_hypernym_depth,
+        consistent_lemma_map=args.consistent_lemma_map,
     )
     return out_path
 
@@ -386,10 +387,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "--semantic-hypernym-depth",
         dest="semantic_hypernym_depth",
         type=int,
-        default=2,
+        default=3,
         help=(
             "Number of hypernym levels to climb when finding semantic class for nouns/verbs "
-            "(default: 2). Adjectives use supersense first, falling back to hypernym at this depth."
+            "(default: 3). Adjectives use supersense first, falling back to hypernym at this depth."
+        ),
+    )
+    ap.add_argument(
+        "--consistent-lemma-map",
+        "--consistent_lemma_map",
+        dest="consistent_lemma_map",
+        action="store_true",
+        default=False,
+        help=(
+            "When enabled, the same original lemma is always swapped to the same replacement "
+            "lemma across the entire dataset, keeping the number of unique types roughly equal "
+            "between original and generated data."
         ),
     )
     return ap

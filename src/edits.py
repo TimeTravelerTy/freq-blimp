@@ -21,6 +21,7 @@ from .semantic_match import (
     apply_verb_semantic_filter,
     REGIME_OFF,
     REGIME_FALLBACK_UNCONSTRAINED,
+    REGIME_ANTICOLLISION_FALLBACK,
 )
 from .verb_inventory import VerbInventory, wordnet_pos_counts
 
@@ -1519,6 +1520,7 @@ def noun_swap_all(
     semantic_match: str = "off",
     semantic_hypernym_depth: int = 2,
     semantic_lexicon: str = "oewn:2021",
+    lemma_map: Optional[dict] = None,
 ):
     """
     rare_lemmas: iterable[str] of candidate noun lemmas. If ``zipf_thr`` is None
@@ -1539,6 +1541,10 @@ def noun_swap_all(
         ignores ``rare_lemmas`` and ``rng`` for selection.
     match_token_count: when True, require replacement surfaces to match the
         tokenizer token count of the original surface.
+    lemma_map: optional shared dict {original_lemma -> replacement_lemma} that
+        is updated in-place.  When provided, free-sampled replacements are stored
+        so the same original lemma always gets the same replacement across the
+        entire dataset (consistent-mapping mode).
     """
     if rng is None:
         rng = random
@@ -1573,6 +1579,8 @@ def noun_swap_all(
             if idx in seen:
                 continue
             token = doc[idx]
+            if not token.is_alpha:
+                continue
             forced_tag = tag or token.tag_
             reflexive_info = reflexive_subjects.get(idx) if isinstance(reflexive_subjects, dict) else None
             if require_person is None:
@@ -1719,6 +1727,15 @@ def noun_swap_all(
                 choice_pool = pool_non_person_checked
             if not choice_pool:
                 return None, [], None
+
+            # Consistent-mapping: reuse a previously assigned replacement when possible.
+            if lemma_map is not None and key in lemma_map:
+                mapped = lemma_map[key]
+                if all(bool(inflect_noun(mapped, tag)) for _, tag, _, _ in group):
+                    chosen_by_key[key] = (mapped, REGIME_OFF)
+                    continue
+                # Mapped lemma can't be inflected here — fall through to fresh sample.
+
             # Semantic class constraint: filter choice_pool by WordNet hypernyms
             semantic_regime = REGIME_OFF
             if semantic_match != "off":
@@ -1737,6 +1754,13 @@ def noun_swap_all(
             )
             if not zipf_weighted:
                 rng.shuffle(pool_order)
+            # Anti-collision: prefer replacements not yet used by any other original.
+            if lemma_map is not None and lemma_map:
+                used_repls = set(lemma_map.values())
+                pool_order = (
+                    [l for l in pool_order if l not in used_repls]
+                    + [l for l in pool_order if l in used_repls]
+                )
             chosen_lemma = None
             saw_token_mismatch = False
             for lemma in pool_order:
@@ -1760,6 +1784,8 @@ def noun_swap_all(
                     return None, [], "noun_no_token_match"
                 return None, [], None
             chosen_by_key[key] = (chosen_lemma, semantic_regime)
+            if lemma_map is not None:
+                lemma_map[key] = chosen_lemma
 
         for token, tag, require_person, require_gender in targets:
             key = _noun_key(token)
@@ -1812,6 +1838,7 @@ def adjective_swap_all(
     semantic_match: str = "off",
     semantic_hypernym_depth: int = 2,
     semantic_lexicon: str = "oewn:2021",
+    lemma_map: Optional[dict] = None,
 ):
     """
     Swap attributive adjectives with rare lemmas.
@@ -1839,6 +1866,8 @@ def adjective_swap_all(
             if idx in seen:
                 continue
             token = doc[idx]
+            if not token.is_alpha:
+                continue
             targets.append((token, tag or token.tag_))
             seen.add(idx)
     else:
@@ -1923,6 +1952,14 @@ def adjective_swap_all(
 
         chosen_by_key = {}
         for key, group in groups.items():
+            # Consistent-mapping: reuse a previously assigned replacement when possible.
+            if lemma_map is not None and key in lemma_map:
+                mapped = lemma_map[key]
+                if all(bool(_inflect_adj_surface(token, tag, mapped)) for token, tag in group):
+                    chosen_by_key[key] = (mapped, REGIME_OFF)
+                    continue
+                # Mapped lemma doesn't inflect here — fall through to fresh sample.
+
             # Semantic class constraint: filter pool by adjective supersense / hypernym
             semantic_regime = REGIME_OFF
             key_pool = pool
@@ -1937,6 +1974,27 @@ def adjective_swap_all(
             pool_order = _weighted_order_by_zipf(key_pool, rng, temp=zipf_temp) if zipf_weighted else list(key_pool)
             if not zipf_weighted:
                 rng.shuffle(pool_order)
+            # Anti-collision: prefer replacement lemmas not yet used by any other
+            # original.  When the semantic pool is fully exhausted (all items
+            # already used), widen to novel candidates from the full rare-adj pool
+            # so different originals don't collapse to the same xtail word.
+            _anticollision_full_pool_candidates: set = set()
+            if lemma_map is not None and lemma_map:
+                used_repls = set(lemma_map.values())
+                novel_in_pool = [l for l in pool_order if l not in used_repls]
+                if novel_in_pool:
+                    pool_order = novel_in_pool + [l for l in pool_order if l in used_repls]
+                else:
+                    # Semantic pool exhausted — widen to novel from the full adj pool.
+                    novel_from_full = [l for l in pool if l not in used_repls and l not in set(pool_order)]
+                    if novel_from_full:
+                        _anticollision_full_pool_candidates = set(novel_from_full)
+                        if zipf_weighted:
+                            novel_from_full = _weighted_order_by_zipf(novel_from_full, rng, temp=zipf_temp)
+                        else:
+                            rng.shuffle(novel_from_full)
+                        pool_order = novel_from_full + pool_order
+                    # else: everything used, keep original pool_order unchanged
             chosen_lemma = None
             saw_token_mismatch = False
             for lemma in pool_order:
@@ -1958,7 +2016,14 @@ def adjective_swap_all(
                 if match_token_count and saw_token_mismatch:
                     return None, [], "adj_no_token_match"
                 return None, [], None
-            chosen_by_key[key] = (chosen_lemma, semantic_regime)
+            effective_regime = (
+                REGIME_ANTICOLLISION_FALLBACK
+                if chosen_lemma in _anticollision_full_pool_candidates
+                else semantic_regime
+            )
+            chosen_by_key[key] = (chosen_lemma, effective_regime)
+            if lemma_map is not None:
+                lemma_map[key] = chosen_lemma
 
         for token, tag in targets:
             key = (token.lemma_ or token.text or "").strip().lower()
@@ -2108,6 +2173,7 @@ def verb_swap_all(
     semantic_match: str = "off",
     semantic_hypernym_depth: int = 2,
     semantic_lexicon: str = "oewn:2021",
+    lemma_map: Optional[dict] = None,
 ):
     """
     Swap lexical verbs using the precomputed verb inventory.
@@ -2156,7 +2222,13 @@ def verb_swap_all(
             return None, [], None
 
     def _verb_key(t: VerbTarget):
-        return (t.lemma or "").strip().lower()
+        # Use (lemma, base_frame) as key so that different frame usages of the
+        # same verb get independent replacement slots.  Stripping the _particle
+        # suffix groups particle variants with their base frame (both can share
+        # a replacement since particles are optionally droppable).
+        lemma = (t.lemma or "").strip().lower()
+        frame = _base_frame_kind(t.frame_kind) or ""
+        return (lemma, frame)
 
     chosen_by_key = {}
 
@@ -2181,7 +2253,14 @@ def verb_swap_all(
 
     for idx, target in enumerate(targets):
         verb_key = _verb_key(target)
-        tied_lemma = chosen_by_key.get(verb_key) if override_list is None else None
+        # Within-call tie: same original verb lemma -> same replacement.
+        # Also seed from the global lemma_map for consistent cross-call mapping.
+        # When override_list is set but this specific entry is None (no forced lemma
+        # for this target), behave like the free-sampling path for lemma_map purposes.
+        _spec_is_override = override_list is not None and isinstance(override_list[idx], dict)
+        tied_lemma = chosen_by_key.get(verb_key) if not _spec_is_override else None
+        if tied_lemma is None and not _spec_is_override and lemma_map is not None:
+            tied_lemma = lemma_map.get(verb_key)
         should_drop_particle = bool(target.drop_particle)
 
         # Semantic class constraint: restrict inventory to VerbNet/hypernym class.
@@ -2254,8 +2333,10 @@ def verb_swap_all(
                 if match_token_count and saw_token_mismatch:
                     return None, [], "verb_no_token_match"
                 return None, [], None
-            if override_list is None and chosen_lemma:
+            if not _spec_is_override and chosen_lemma:
                 chosen_by_key[verb_key] = chosen_lemma
+                if lemma_map is not None and verb_key not in lemma_map:
+                    lemma_map[verb_key] = chosen_lemma
             toks[target.token.i] = _match_casing(target.token.text, chosen_form)
             if drop_particle and particle_token is not None:
                 toks[particle_token.i] = ""
@@ -2265,6 +2346,8 @@ def verb_swap_all(
                 "new": toks[target.token.i],
                 "tag": target.tag,
                 "lemma": chosen_lemma,
+                "src_lemma": (target.lemma or "").strip().lower(),
+                "base_frame": _base_frame_kind(target.frame_kind) or "",
                 "frame": forced_frame or ("that_clause" if target.has_that_clause else "clausal_complement"),
                 "prep_i": None,
                 "prep_old": None,
@@ -2384,6 +2467,24 @@ def verb_swap_all(
                     if _token_count(tokenizer_obj, tied_form) != token_counts.get(target.token.i, 0):
                         return None, [], "verb_no_token_match"
 
+            # Anti-collision (free-sampling only): prefer replacement lemmas not yet
+            # assigned to any other original verb.  Build a novel-only inventory and
+            # attempt each frame in order; if that yields nothing, the main loop below
+            # falls back to the full active_inventory.
+            if sample is None and not tied_lemma and not _spec_is_override and lemma_map is not None and lemma_map:
+                used_verb_repls = frozenset(lemma_map.values())
+                novel_lemmas = frozenset(
+                    e.lemma for e in active_inventory.entries if e.lemma not in used_verb_repls
+                )
+                if novel_lemmas:
+                    novel_inv = active_inventory.restrict_to(novel_lemmas)
+                    if not novel_inv.is_empty():
+                        for fk in frame_order:
+                            s, _ = _select_matching_sample(fk, prep_text, desired_particle, forced_restrict, novel_inv)
+                            if s:
+                                sample = s
+                                break
+
             token_mismatch_seen = False
 
             for fk in frame_order:
@@ -2472,8 +2573,10 @@ def verb_swap_all(
                         return None, [], "verb_no_token_match"
                     return None, [], None
             entry, frame = sample
-            if override_list is None and entry and entry.lemma:
+            if not _spec_is_override and entry and entry.lemma:
                 chosen_by_key[verb_key] = entry.lemma
+                if lemma_map is not None and verb_key not in lemma_map:
+                    lemma_map[verb_key] = entry.lemma
 
         form = inflect_verb(entry.lemma, target.tag)
         if not form:
@@ -2525,6 +2628,8 @@ def verb_swap_all(
             "new": toks[target.token.i],
             "tag": target.tag,
             "lemma": entry.lemma,
+            "src_lemma": (target.lemma or "").strip().lower(),
+            "base_frame": _base_frame_kind(target.frame_kind) or "",
             "frame": frame.kind,
             "prep_i": target.prep_token.i if target.prep_token is not None else None,
             "prep_old": prep_old,
@@ -2554,6 +2659,7 @@ def verb_swap_from_pool(
     rng: Optional[random.Random] = None,
     match_token_count: bool = False,
     tokenizer_name: Optional[str] = None,
+    lemma_map: Optional[dict] = None,
     tokenizer=None,
 ):
     """
@@ -2600,8 +2706,10 @@ def verb_swap_from_pool(
         if _frame_requires_particle(target.frame_kind) and target.particle_token is None:
             return None, [], None
 
-        key = (target.lemma or "").strip().lower()
-        tied = chosen_by_key.get(key)
+        pool_key = ((target.lemma or "").strip().lower(), _base_frame_kind(target.frame_kind) or "")
+        tied = chosen_by_key.get(pool_key)
+        if tied is None and lemma_map is not None:
+            tied = lemma_map.get(pool_key)
         chosen = None
         if tied:
             form = _inflect_pool_lemma(tied, target.tag)
@@ -2631,7 +2739,9 @@ def verb_swap_from_pool(
                 return None, [], "verb_no_token_match"
             return None, [], None
         lemma, form = chosen
-        chosen_by_key[key] = lemma
+        chosen_by_key[pool_key] = lemma
+        if lemma_map is not None and pool_key not in lemma_map:
+            lemma_map[pool_key] = lemma
         toks[target.token.i] = _match_casing(target.token.text, form)
 
         prep_old = target.prep_token.text if target.prep_token is not None else None
@@ -2653,6 +2763,8 @@ def verb_swap_from_pool(
             "new": toks[target.token.i],
             "tag": target.tag,
             "lemma": lemma,
+            "src_lemma": (target.lemma or "").strip().lower(),
+            "base_frame": _base_frame_kind(target.frame_kind) or "",
             "frame": target.frame_kind,
             "prep_i": target.prep_token.i if target.prep_token is not None else None,
             "prep_old": prep_old,

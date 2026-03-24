@@ -29782,22 +29782,6 @@
       },
       {
         "type": "trans"
-      },
-      {
-        "type": "intr_pp",
-        "prep": "by"
-      },
-      {
-        "type": "intr_pp",
-        "prep": "from"
-      },
-      {
-        "type": "intr_pp",
-        "prep": "in"
-      },
-      {
-        "type": "intr_pp",
-        "prep": "to"
       }
     ]
   },

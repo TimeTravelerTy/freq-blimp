@@ -42,12 +42,15 @@ REGIME_SATISFIED = "satisfied"
 REGIME_FALLBACK_DEPTH = "fallback_depth"
 REGIME_FALLBACK_UNCONSTRAINED = "fallback_unconstrained"
 REGIME_DROPPED = "dropped"
+# Anti-collision exhausted the semantic pool; widened to the full rare pool.
+REGIME_ANTICOLLISION_FALLBACK = "anticollision_fallback"
 
 # Ordered for reporting
 _REGIME_ORDER = (
     REGIME_SATISFIED,
     REGIME_FALLBACK_DEPTH,
     REGIME_FALLBACK_UNCONSTRAINED,
+    REGIME_ANTICOLLISION_FALLBACK,
     REGIME_DROPPED,
     REGIME_OFF,
 )

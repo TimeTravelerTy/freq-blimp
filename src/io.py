@@ -5,9 +5,14 @@ from typing import Dict, Optional, Sequence
 
 from datasets import load_dataset
 
+_BLIMP_CACHE: dict = {}
+
+
 def load_blimp(config_name):
     # BLiMP requires a config like 'regular_plural_subject_verb_agreement_1'
-    return load_dataset("nyu-mll/blimp", config_name)["train"]
+    if config_name not in _BLIMP_CACHE:
+        _BLIMP_CACHE[config_name] = load_dataset("nyu-mll/blimp", config_name)["train"]
+    return _BLIMP_CACHE[config_name]
 
 def write_jsonl(path, records):
     p = pathlib.Path(path)
