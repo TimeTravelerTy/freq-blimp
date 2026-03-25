@@ -124,10 +124,12 @@ def _pick_swapped(rec: dict) -> tuple:
 # Memory estimate
 # ---------------------------------------------------------------------------
 
-def _print_memory_info(model_name: str, n_gpus_visible: int = 0):
+def _print_memory_info(model_name: str, n_gpus_visible: int = 0, load_in_8bit: bool = False):
     """Print a quick memory sanity check before loading the model."""
+    est_gb = _MODEL_SIZE_GB / 2 if load_in_8bit else _MODEL_SIZE_GB
     print(f"\n[Memory] Model: {model_name}")
-    print(f"[Memory] Estimated size (bf16): {_MODEL_SIZE_GB:.0f} GB")
+    quant_label = " (int8)" if load_in_8bit else " (bf16)"
+    print(f"[Memory] Estimated size{quant_label}: {est_gb:.0f} GB")
     if n_gpus_visible:
         try:
             import torch
@@ -139,7 +141,7 @@ def _print_memory_info(model_name: str, n_gpus_visible: int = 0):
                 f"[Memory] Visible GPU memory: {total_gb:.0f} GB "
                 f"({n_gpus_visible} × GPU)"
             )
-            headroom = total_gb - _MODEL_SIZE_GB
+            headroom = total_gb - est_gb
             if headroom < 8:
                 print(
                     f"[Memory] WARNING: only {headroom:.1f} GB headroom — "
@@ -363,6 +365,11 @@ def main():
         help="Disable trust_remote_code (Qwen requires it by default).",
     )
     ap.add_argument(
+        "--load-in-8bit",
+        action="store_true",
+        help="Load model in 8-bit (bitsandbytes). Reduces 72B from ~144GB to ~72GB; fits on 1×H100.",
+    )
+    ap.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing output files.",
@@ -394,7 +401,7 @@ def main():
     except Exception:
         n_gpus = 0
 
-    _print_memory_info(args.model, n_gpus)
+    _print_memory_info(args.model, n_gpus, load_in_8bit=args.load_in_8bit)
 
     if args.limit:
         print(f"[Info] TEST MODE: processing first {args.limit} items per regime.")
@@ -404,14 +411,16 @@ def main():
     originals = load_originals(ORIGINAL_DATASET)
 
     # Load model once (shared across all regimes)
+    quant_tag = " load_in_8bit=True" if args.load_in_8bit else ""
     print(f"[Model] Loading {args.model} ...")
-    print(f"[Model] device_map=auto  dtype={args.dtype}  trust_remote_code={args.trust_remote_code}")
+    print(f"[Model] device_map=auto  dtype={args.dtype}  trust_remote_code={args.trust_remote_code}{quant_tag}")
     t_load = time.time()
     scorer = LlamaNLLScorer(
         model_name=args.model,
         dtype=args.dtype,
         device_map="auto",
         trust_remote_code=args.trust_remote_code,
+        load_in_8bit=args.load_in_8bit,
     )
     print(f"[Model] Ready in {time.time() - t_load:.1f}s\n")
 

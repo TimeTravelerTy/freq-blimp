@@ -70,6 +70,8 @@ class LlamaNLLScorer:
         use_fast: bool = True,
         trust_remote_code: bool = False,
         padding_side: str = "left",
+        load_in_8bit: bool = False,
+        load_in_4bit: bool = False,
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -107,6 +109,10 @@ class LlamaNLLScorer:
             model_kwargs["trust_remote_code"] = True
         if device_map:
             model_kwargs["device_map"] = device_map
+        if load_in_8bit:
+            model_kwargs["load_in_8bit"] = True
+        if load_in_4bit:
+            model_kwargs["load_in_4bit"] = True
         self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
         if added_pad_token:
             self.model.resize_token_embeddings(len(self.tokenizer))
