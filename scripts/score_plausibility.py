@@ -44,22 +44,20 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.sentence_nll import LlamaNLLScorer, SequenceScore
 
 # ---------------------------------------------------------------------------
-# Dataset registry — old NLP2026 datasets that have both original + swapped
+# Dataset registry — NLP2026 paper datasets (git-tracked, on TSUBAME)
+#
+# Swapped sentences: freq_blimp_*_generated.jsonl  (good_freq / bad_freq)
+# Original sentences: blimp_original.jsonl          (good_original / bad_original)
+#
+# The generated files are the same data as the Dec-2025 timestamped datasets
+# used to produce the local accuracy results; good_freq == good_rare there.
 # ---------------------------------------------------------------------------
 REGIME_DATASETS: Dict[str, str] = {
-    "head": (
-        "data/processed/"
-        "20251228-165517_rare_blimp_zipf3_6-5_0_adj3_6-5_0_verb3_6-5_0.jsonl"
-    ),
-    "tail": (
-        "data/processed/"
-        "20251228-165513_rare_blimp_zipf2_2-3_0_adj2_2-3_0_verb2_2-3_0.jsonl"
-    ),
-    "xtail": (
-        "data/processed/"
-        "20251228-165511_rare_blimp_zipf1_2-2_0_adj1_2-2_0_verb1_2-2_0.jsonl"
-    ),
+    "head":  "data/processed/freq_blimp_head_zipf3_6-5_0_generated.jsonl",
+    "tail":  "data/processed/freq_blimp_tail_zipf2_2-3_0_generated.jsonl",
+    "xtail": "data/processed/freq_blimp_xtail_zipf1_2-2_0_generated.jsonl",
 }
+ORIGINAL_DATASET = "data/processed/blimp_original.jsonl"
 
 DEFAULT_MODEL = "Qwen/Qwen2.5-72B"
 DEFAULT_OUT_DIR = "results/plausibility_scores"
@@ -86,10 +84,32 @@ def _iter_jsonl(path: str, limit: Optional[int] = None):
                 continue
 
 
-def _pick_original(rec: dict) -> tuple:
-    """Return (good_original, bad_original) strings."""
+def load_originals(path: str) -> dict:
+    """Load blimp_original.jsonl → dict keyed by (phenomenon, subtask, idx)."""
+    index = {}
+    for rec in _iter_jsonl(path):
+        key = (rec.get("phenomenon"), rec.get("subtask"), rec.get("idx"))
+        index[key] = (
+            rec.get("good_original") or rec.get("sentence_good"),
+            rec.get("bad_original")  or rec.get("sentence_bad"),
+        )
+    print(f"[Originals] Loaded {len(index):,} items from {path}")
+    return index
+
+
+def _pick_original(rec: dict, originals: Optional[dict] = None) -> tuple:
+    """Return (good_original, bad_original) strings.
+
+    Falls back to the originals index when the record only has good_freq/bad_freq
+    (i.e. the _generated.jsonl format used for the paper datasets).
+    """
     g = rec.get("good_original") or rec.get("sentence_good") or rec.get("good")
-    b = rec.get("bad_original") or rec.get("sentence_bad") or rec.get("bad")
+    b = rec.get("bad_original")  or rec.get("sentence_bad")  or rec.get("bad")
+    if (g is None or b is None) and originals is not None:
+        key = (rec.get("phenomenon"), rec.get("subtask"), rec.get("idx"))
+        g_idx, b_idx = originals.get(key, (None, None))
+        g = g or g_idx
+        b = b or b_idx
     return g, b
 
 
@@ -145,6 +165,7 @@ def score_regime(
     max_length: int,
     limit: Optional[int],
     overwrite: bool,
+    originals: Optional[dict] = None,
 ) -> int:
     """Score all items in one regime dataset. Returns number of items written."""
 
@@ -165,7 +186,7 @@ def score_regime(
     skipped = 0
 
     for rec in records:
-        g_orig, b_orig = _pick_original(rec)
+        g_orig, b_orig = _pick_original(rec, originals)
         g_swap, b_swap = _pick_swapped(rec)
         if not all(isinstance(s, str) and s.strip() for s in [g_orig, b_orig, g_swap, b_swap]):
             skipped += 1
@@ -379,6 +400,9 @@ def main():
         print(f"[Info] TEST MODE: processing first {args.limit} items per regime.")
         print(f"[Info] Remove --limit for the full run.\n")
 
+    # Load original sentences index once (shared across all regimes)
+    originals = load_originals(ORIGINAL_DATASET)
+
     # Load model once (shared across all regimes)
     print(f"[Model] Loading {args.model} ...")
     print(f"[Model] device_map=auto  dtype={args.dtype}  trust_remote_code={args.trust_remote_code}")
@@ -417,6 +441,7 @@ def main():
             max_length=args.max_length,
             limit=args.limit,
             overwrite=args.overwrite,
+            originals=originals,
         )
         total_items += n
         if n > 0:
