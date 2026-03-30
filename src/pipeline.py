@@ -641,7 +641,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
         if record_limit and spacy_n_process and spacy_n_process > 1:
             spacy_n_process = 1
 
-    nlp = spacy.load("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm", exclude=["ner"])
     with open(tier_cfg_path, encoding="utf-8") as f:
         tasks_cfg = yaml.safe_load(f)
     becl_map = load_becl_tsv(becl_path)
@@ -980,6 +980,7 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
                                 "prep_i": None,
                                 "particle_i": None,
                                 "that_clause": False,
+                                "enforce_transitivity": True,
                             }]
                             g_verb_variant, g_verb_swaps, g_verb_reason = verb_swap_all(
                                 gdoc_working,

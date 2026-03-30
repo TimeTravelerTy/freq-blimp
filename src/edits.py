@@ -1644,13 +1644,16 @@ def noun_swap_all(
                 if _token_count(tokenizer_obj, candidate_surface) != token_counts.get(token.i, 0):
                     return None, [], "noun_no_token_match"
             old_surface = _apply_noun_form(token, form, toks)
-            swaps.append({
+            swap_rec = {
                 "i": token.i,
                 "old": old_surface,
                 "new": form,
                 "tag": tag,
                 "lemma": lemma,
-            })
+            }
+            if semantic_match != "off":
+                swap_rec["semantic_regime"] = REGIME_OFF
+            swaps.append(swap_rec)
     else:
         rare_tuple = rare_lemmas if isinstance(rare_lemmas, tuple) else tuple(rare_lemmas)
         person_tuple = ()
@@ -1933,13 +1936,16 @@ def adjective_swap_all(
                 if _token_count(tokenizer_obj, surface) != token_counts.get(token.i, 0):
                     return None, [], "adj_no_token_match"
             toks[token.i] = _match_casing(token.text, surface)
-            swaps.append({
+            swap_rec = {
                 "i": token.i,
                 "old": token.text,
                 "new": toks[token.i],
                 "tag": tag,
                 "lemma": lemma,
-            })
+            }
+            if semantic_match != "off":
+                swap_rec["semantic_regime"] = REGIME_OFF
+            swaps.append(swap_rec)
     else:
         pool = list(_prepare_adj_pool(rare_lemmas, zipf_thr, zipf_min))
         if not pool:
@@ -2480,7 +2486,17 @@ def verb_swap_all(
                     novel_inv = active_inventory.restrict_to(novel_lemmas)
                     if not novel_inv.is_empty():
                         for fk in frame_order:
-                            s, _ = _select_matching_sample(fk, prep_text, desired_particle, forced_restrict, novel_inv)
+                            # Mirror the restrict logic from the main loop below so
+                            # enforce_transitivity is respected even in the anti-collision
+                            # path (forced_restrict is None when enforce_transitivity is
+                            # set, which would otherwise let wrong-transitivity verbs through).
+                            _ac_restrict = forced_restrict
+                            if _ac_restrict is None and target.enforce_transitivity:
+                                if fk.startswith("intr"):
+                                    _ac_restrict = "intr_only"
+                                elif fk.startswith("trans") or fk.startswith("ditrans"):
+                                    _ac_restrict = "trans_only"
+                            s, _ = _select_matching_sample(fk, prep_text, desired_particle, _ac_restrict, novel_inv)
                             if s:
                                 sample = s
                                 break

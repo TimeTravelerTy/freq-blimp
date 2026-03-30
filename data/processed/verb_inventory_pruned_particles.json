@@ -41230,9 +41230,6 @@
     "lemma": "listen",
     "frames": [
       {
-        "type": "trans"
-      },
-      {
         "type": "intr_pp",
         "prep": "over"
       },

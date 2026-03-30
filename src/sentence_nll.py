@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import torch
 
@@ -16,10 +16,15 @@ class SequenceScore:
     total_nll: float
     token_count: int
 
+    @property
+    def total_logprob(self) -> float:
+        return -self.total_nll
+
     def as_dict(self):
         return {
             "text": self.text,
             "total_nll": self.total_nll,
+            "total_logprob": self.total_logprob,
             "token_count": self.token_count,
         }
 
@@ -51,6 +56,14 @@ def _tokenizer_help_error(model_name: str) -> RuntimeError:
         "`sentencepiece` and `protobuf` in your environment."
     )
     return RuntimeError(msg)
+
+
+def _last_nonpad_indices(attention_mask: torch.Tensor) -> torch.Tensor:
+    if attention_mask.ndim != 2:
+        raise ValueError("attention_mask must be rank 2")
+    flipped = attention_mask.to(dtype=torch.int64).flip(dims=[1])
+    from_right = flipped.argmax(dim=1)
+    return attention_mask.shape[1] - 1 - from_right
 
 
 class LlamaNLLScorer:
@@ -178,4 +191,55 @@ class LlamaNLLScorer:
                         token_count=count,
                     )
                 )
+        return results
+
+    def score_next_token_probabilities(
+        self,
+        prompts: Sequence[str],
+        token_id_groups: Dict[str, Sequence[int]],
+        batch_size: int = 8,
+        max_length: Optional[int] = 256,
+        show_progress: bool = False,
+    ) -> List[Dict[str, float]]:
+        results: List[Dict[str, float]] = []
+        if not prompts:
+            return results
+        use_amp = self.device.type in {"cuda", "mps"}
+        batches = list(_chunked(prompts, batch_size))
+        if show_progress and tqdm is not None:
+            batches = tqdm(batches, desc="Scoring", unit="batch")
+        token_id_groups = {
+            label: [int(tok_id) for tok_id in tok_ids]
+            for label, tok_ids in token_id_groups.items()
+            if tok_ids
+        }
+        if not token_id_groups:
+            raise ValueError("token_id_groups must contain at least one non-empty token list")
+        for batch in batches:
+            encoded = self.tokenizer(
+                list(batch),
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+            )
+            input_ids = encoded["input_ids"].to(self.device, non_blocking=True)
+            attention_mask = encoded["attention_mask"].to(self.device, non_blocking=True)
+            with torch.inference_mode():
+                with torch.amp.autocast(
+                    device_type=self.device.type,
+                    dtype=self.dtype,
+                    enabled=use_amp,
+                ):
+                    outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            last_indices = _last_nonpad_indices(attention_mask)
+            batch_indices = torch.arange(input_ids.shape[0], device=self.device)
+            next_logits = outputs.logits[batch_indices, last_indices, :]
+            next_probs = torch.softmax(next_logits, dim=-1)
+            for i in range(next_probs.shape[0]):
+                row: Dict[str, float] = {}
+                for label, tok_ids in token_id_groups.items():
+                    prob = next_probs[i, tok_ids].sum()
+                    row[label] = float(prob.item())
+                results.append(row)
         return results

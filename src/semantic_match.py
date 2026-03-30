@@ -32,6 +32,13 @@ try:
 except Exception:
     _VERBNET_AVAILABLE = False
 
+try:
+    from nltk.corpus import wordnet as _nltk_wn  # type: ignore
+    _nltk_wn.synsets("run")
+    _NLTK_WN_AVAILABLE = True
+except Exception:
+    _NLTK_WN_AVAILABLE = False
+
 _WN_LEXICON = "oewn:2021"
 
 # ---------------------------------------------------------------------------
@@ -44,11 +51,14 @@ REGIME_FALLBACK_UNCONSTRAINED = "fallback_unconstrained"
 REGIME_DROPPED = "dropped"
 # Anti-collision exhausted the semantic pool; widened to the full rare pool.
 REGIME_ANTICOLLISION_FALLBACK = "anticollision_fallback"
+# Tertiary fallback: NLTK WordNet lexname (broad semantic category) match.
+REGIME_FALLBACK_LEXNAME = "fallback_lexname"
 
 # Ordered for reporting
 _REGIME_ORDER = (
     REGIME_SATISFIED,
     REGIME_FALLBACK_DEPTH,
+    REGIME_FALLBACK_LEXNAME,
     REGIME_FALLBACK_UNCONSTRAINED,
     REGIME_ANTICOLLISION_FALLBACK,
     REGIME_DROPPED,
@@ -180,6 +190,36 @@ def verb_hypernym_ids(
 
 
 @lru_cache(maxsize=8192)
+def noun_lexnames(lemma: str) -> FrozenSet[str]:
+    """Return frozenset of NLTK WordNet lexicographer file names for a noun lemma.
+
+    Lexnames are coarse semantic categories (e.g. ``noun.animal``, ``noun.artifact``,
+    ``noun.person``) used as a broad tertiary fallback when OEWN hypernym matching
+    fails.  Returns an empty frozenset if NLTK WordNet is unavailable or the
+    lemma has no coverage.
+    """
+    if not _NLTK_WN_AVAILABLE:
+        return frozenset()
+    try:
+        syns = _nltk_wn.synsets(lemma, pos="n") or ()
+        return frozenset(s.lexname() for s in syns if s.lexname())
+    except Exception:
+        return frozenset()
+
+
+@lru_cache(maxsize=8192)
+def verb_lexnames(lemma: str) -> FrozenSet[str]:
+    """Return frozenset of NLTK WordNet lexicographer file names for a verb lemma."""
+    if not _NLTK_WN_AVAILABLE:
+        return frozenset()
+    try:
+        syns = _nltk_wn.synsets(lemma, pos="v") or ()
+        return frozenset(s.lexname() for s in syns if s.lexname())
+    except Exception:
+        return frozenset()
+
+
+@lru_cache(maxsize=8192)
 def verbnet_classes_for_lemma(lemma: str) -> FrozenSet[str]:
     """Return frozenset of VerbNet class IDs (+ immediate parent) for a verb lemma."""
     if not _VERBNET_AVAILABLE:
@@ -222,25 +262,31 @@ def apply_noun_semantic_filter(
         return pool, REGIME_FALLBACK_UNCONSTRAINED
 
     src_ids = noun_hypernym_ids(source_lemma, depth, lexicon)
-    if not src_ids:
-        return pool, REGIME_FALLBACK_UNCONSTRAINED
-
-    filtered = tuple(
-        w for w in pool
-        if bool(src_ids & noun_hypernym_ids(w, depth, lexicon))
-    )
-    if filtered:
-        return filtered, REGIME_SATISFIED
-
-    # Try depth+1
-    src_ids_plus = noun_hypernym_ids(source_lemma, depth + 1, lexicon)
-    if src_ids_plus:
-        filtered_plus = tuple(
+    if src_ids:
+        filtered = tuple(
             w for w in pool
-            if bool(src_ids_plus & noun_hypernym_ids(w, depth + 1, lexicon))
+            if bool(src_ids & noun_hypernym_ids(w, depth, lexicon))
         )
-        if filtered_plus:
-            return filtered_plus, REGIME_FALLBACK_DEPTH
+        if filtered:
+            return filtered, REGIME_SATISFIED
+
+        # Try depth+1
+        src_ids_plus = noun_hypernym_ids(source_lemma, depth + 1, lexicon)
+        if src_ids_plus:
+            filtered_plus = tuple(
+                w for w in pool
+                if bool(src_ids_plus & noun_hypernym_ids(w, depth + 1, lexicon))
+            )
+            if filtered_plus:
+                return filtered_plus, REGIME_FALLBACK_DEPTH
+
+    # Tertiary fallback: NLTK WordNet lexname (broad semantic category).
+    # Runs whether or not OEWN had synsets for the source lemma.
+    src_lexnames = noun_lexnames(source_lemma)
+    if src_lexnames:
+        filtered_lex = tuple(w for w in pool if bool(src_lexnames & noun_lexnames(w)))
+        if filtered_lex:
+            return filtered_lex, REGIME_FALLBACK_LEXNAME
 
     return pool, REGIME_FALLBACK_UNCONSTRAINED
 
@@ -334,6 +380,13 @@ def apply_verb_semantic_filter(
         )
         if filtered_plus:
             return filtered_plus, REGIME_FALLBACK_DEPTH
+
+    # Tertiary fallback: NLTK WordNet lexname (broad semantic category).
+    src_lexnames = verb_lexnames(source_lemma)
+    if src_lexnames:
+        filtered_lex = tuple(w for w in lemma_pool if bool(src_lexnames & verb_lexnames(w)))
+        if filtered_lex:
+            return filtered_lex, REGIME_FALLBACK_LEXNAME
 
     return lemma_pool, REGIME_FALLBACK_UNCONSTRAINED
 

@@ -271,16 +271,12 @@ def _lemma_has_domain(lemma: str, lexicon: str, domain: str) -> bool:
                 return True
         return False
 
-    for syn in synsets:
-        if _matches(syn):
-            return True
-        try:
-            hypernyms = syn.hypernyms()
-        except AttributeError:
-            hypernyms = ()
-        for hyper in hypernyms:
-            if _matches(hyper):
-                return True
+    # Only check the first (primary/most-common) synset.  Checking all synsets
+    # or traversing hypernyms causes false positives: words like "machine",
+    # "chicken", "pillar", "doll" have secondary person-metaphor senses in OEWN
+    # that contaminate the person pool and break s-selection animacy constraints.
+    if synsets:
+        return _matches(synsets[0])
     return False
 
 

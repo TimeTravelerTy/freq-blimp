@@ -33,8 +33,13 @@ def analyze(path: str, check_consistency: bool = False, verbose: bool = False):
     non_alpha = collections.Counter()
     wearisome = adj_total = 0
 
-    # Occurrence-level semantic regime counts per POS
+    # Occurrence-level semantic regime counts per POS (fresh samples only)
     sem_regime = {"noun": collections.Counter(), "adjective": collections.Counter(), "verb": collections.Counter()}
+
+    # For occurrence-level stats: track canonical regime per source key and total occ count.
+    # canonical regime = first non-OFF regime seen for that key (set at the fresh-sample event).
+    key_regime = {"noun": {}, "adjective": {}, "verb": {}}
+    key_occ    = {"noun": collections.Counter(), "adjective": collections.Counter(), "verb": collections.Counter()}
 
     with open(path) as f:
         for line in f:
@@ -64,6 +69,15 @@ def analyze(path: str, check_consistency: bool = False, verbose: bool = False):
 
                     if regime is not None and pos in sem_regime:
                         sem_regime[pos][regime] += 1
+
+                    # Track per-key canonical regime and occurrence count.
+                    # Key = replacement lemma (consistent-lemma-map: all surface forms of
+                    # the same source lemma share the same replacement → correct grouping).
+                    if pos in key_regime:
+                        occ_key = repl  # replacement lemma (already lowercased above)
+                        key_occ[pos][occ_key] += 1
+                        if regime is not None and regime != REGIME_OFF and occ_key not in key_regime[pos]:
+                            key_regime[pos][occ_key] = regime
 
                     if check_consistency:
                         if pos == "noun":
@@ -104,18 +118,50 @@ def analyze(path: str, check_consistency: bool = False, verbose: bool = False):
             if total_sem:
                 satisfied = sum(v for k, v in c.items() if k not in (REGIME_OFF,) and "fallback" not in k)
                 fallback_depth = c.get("fallback_depth", 0)
+                fallback_lexname = c.get("fallback_lexname", 0)
                 fallback_unc = c.get("fallback_unconstrained", 0)
                 anticoll = c.get("anticollision_fallback", 0)
                 print(f"    Fresh samples : {total_sem:,}")
                 print(f"    satisfied     : {satisfied:,} ({100*satisfied/total_sem:.1f}%)")
                 if fallback_depth:
                     print(f"    fallback_depth: {fallback_depth:,} ({100*fallback_depth/total_sem:.1f}%)")
+                if fallback_lexname:
+                    print(f"    fallback_lexnm: {fallback_lexname:,} ({100*fallback_lexname/total_sem:.1f}%)")
                 if fallback_unc:
                     print(f"    fallback_unc  : {fallback_unc:,} ({100*fallback_unc/total_sem:.1f}%)")
                 if anticoll:
                     print(f"    anticollision : {anticoll:,} ({100*anticoll/total_sem:.1f}%)")
-                # Occurrence-level: what % of non-cache-hit occurrences are satisfied?
-                # (for consistent mapping, cache hits use the lemma_map's stored regime)
+
+    # Occurrence-level breakdown (all occurrences, including cache hits).
+    # Each occurrence inherits the canonical regime of its source key's first fresh sample.
+    any_key_regime = any(bool(key_regime[p]) for p in ("noun", "adjective", "verb"))
+    if any_key_regime:
+        print(f"\nSemantic regime (occurrence-level, all occurrences inherit source-key regime):")
+        for pos_name in ("noun", "adjective", "verb"):
+            kr = key_regime[pos_name]
+            ko = key_occ[pos_name]
+            if not ko:
+                continue
+            # Build occurrence-weighted regime counter.
+            occ_by_regime: collections.Counter = collections.Counter()
+            for src_key, count in ko.items():
+                r = kr.get(src_key, REGIME_OFF)
+                occ_by_regime[r] += count
+            total_occ = sum(occ_by_regime.values())
+            constrained = sum(v for k, v in occ_by_regime.items() if k != REGIME_OFF and "fallback_unconstrained" not in k)
+            unc = occ_by_regime.get("fallback_unconstrained", 0)
+            cache_only = occ_by_regime.get(REGIME_OFF, 0)
+            print(f"  {pos_name.upper()}: {total_occ:,} occ total")
+            for regime_key in ("satisfied", "fallback_depth", "fallback_lexname",
+                               "fallback_unconstrained", "anticollision_fallback"):
+                n = occ_by_regime.get(regime_key, 0)
+                if n:
+                    print(f"    {regime_key:32s}: {n:,} ({100*n/total_occ:.1f}%)")
+            if cache_only:
+                print(f"    {'no_regime_recorded':32s}: {cache_only:,} ({100*cache_only/total_occ:.1f}%)")
+            sem_total = total_occ - cache_only
+            if sem_total:
+                print(f"    → constrained (not unc)   : {constrained:,}/{sem_total:,} ({100*constrained/sem_total:.1f}%)")
 
     if check_consistency:
         def _report(name, d):
