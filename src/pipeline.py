@@ -1,5 +1,5 @@
 import random, spacy, yaml, time
-from typing import Optional, Sequence
+from typing import Iterable, Optional, Sequence
 from pathlib import Path
 from spacy.lang.en.stop_words import STOP_WORDS as _STOP_WORDS
 from wordfreq import zipf_frequency
@@ -418,13 +418,21 @@ def _unique(seq):
     return out
 
 
-def _control_verb_pool(inventory):
+def _control_verb_pool(inventory, excluded_lemmas: Optional[Iterable[str]] = None):
     if inventory is None:
         return tuple()
+    excluded = {
+        str(lemma).strip().lower()
+        for lemma in (excluded_lemmas or ())
+        if isinstance(lemma, str) and str(lemma).strip()
+    }
     lemmas = []
     seen = set()
     for entry in inventory.entries:
         if any(frame.kind == "trans" for frame in entry.frames):
+            lemma = entry.lemma.lower()
+            if lemma in excluded:
+                continue
             if entry.lemma not in seen:
                 lemmas.append(entry.lemma)
                 seen.add(entry.lemma)
@@ -879,7 +887,14 @@ def build_pilot(tier_cfg_path, becl_path, quant_cfg_path, out_path,
         docs_iter = nlp.pipe(_iter_good_bad(ds), batch_size=spacy_batch_size, n_process=spacy_n_process)
 
         is_control_raising = phenomenon == "control_raising"
-        control_verb_pool = _control_verb_pool(verb_inventory_obj) if is_control_raising else tuple()
+        control_verb_pool = (
+            _control_verb_pool(
+                verb_inventory_obj,
+                excluded_lemmas=_raising_verb_list_for_cfg(cfg),
+            )
+            if is_control_raising
+            else tuple()
+        )
 
         for i, r in enumerate(ds):
                 g, b = r["sentence_good"], r["sentence_bad"]

@@ -2716,16 +2716,23 @@ def verb_swap_from_pool(
     swaps = []
 
     chosen_by_key = {}
+    pool_signature = tuple(pool)
     for target in targets:
         if _frame_requires_prep(target.frame_kind) and target.prep_token is None:
             return None, [], None
         if _frame_requires_particle(target.frame_kind) and target.particle_token is None:
             return None, [], None
 
-        pool_key = ((target.lemma or "").strip().lower(), _base_frame_kind(target.frame_kind) or "")
+        pool_key = (
+            (target.lemma or "").strip().lower(),
+            _base_frame_kind(target.frame_kind) or "",
+            pool_signature,
+        )
         tied = chosen_by_key.get(pool_key)
         if tied is None and lemma_map is not None:
             tied = lemma_map.get(pool_key)
+        if tied is not None and tied not in pool:
+            tied = None
         chosen = None
         if tied:
             form = _inflect_pool_lemma(tied, target.tag)

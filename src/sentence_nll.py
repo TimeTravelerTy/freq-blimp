@@ -46,6 +46,10 @@ def _select_dtype(device: torch.device, requested: Optional[str]):
         if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
             return torch.bfloat16
         return torch.float16
+    if device.type == "mps":
+        # MPS benefits from reduced precision; float32 disables autocast
+        # and is substantially slower for local Apple GPU inference.
+        return torch.float16
     return torch.float32
 
 
@@ -174,10 +178,17 @@ class LlamaNLLScorer:
                 ):
                     outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             logits = outputs.logits
+            if self.device.type == "mps":
+                # Some MPS reductions can produce NaNs here even when the forward
+                # pass itself is fine. Move post-forward scoring to CPU float32.
+                logits = logits.float().cpu()
+                shift_labels = input_ids[:, 1:].cpu()
+                shift_mask = attention_mask[:, 1:].cpu()
+            else:
+                shift_labels = input_ids[:, 1:]
+                shift_mask = attention_mask[:, 1:]
             logprobs = torch.log_softmax(logits, dim=-1)
             shift_logprobs = logprobs[:, :-1, :]
-            shift_labels = input_ids[:, 1:]
-            shift_mask = attention_mask[:, 1:]
             nll = -shift_logprobs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
             nll = nll * shift_mask
             token_counts = shift_mask.sum(dim=1)
@@ -235,6 +246,8 @@ class LlamaNLLScorer:
             last_indices = _last_nonpad_indices(attention_mask)
             batch_indices = torch.arange(input_ids.shape[0], device=self.device)
             next_logits = outputs.logits[batch_indices, last_indices, :]
+            if self.device.type == "mps":
+                next_logits = next_logits.float().cpu()
             next_probs = torch.softmax(next_logits, dim=-1)
             for i in range(next_probs.shape[0]):
                 row: Dict[str, float] = {}
