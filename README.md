@@ -86,13 +86,3 @@ python3 scripts/regime_diagnostics.py --help
 python3 scripts/make_frequency_figures_current.py --help
 python3 scripts/analyze_linguistic_frequency_effects.py --help
 ```
-
-The analysis scripts write to `results/` by default. Keep generated result
-bundles outside Git and attach final bundles as release/artifact files.
-
-## Repository Hygiene
-
-- Keep source changes in Git, but keep model outputs, logs, local caches, and
-  bulky result bundles out of Git.
-- The public repository should be named `freq-blimp-eval`; update the GitHub
-  repository name/remote when publishing.
