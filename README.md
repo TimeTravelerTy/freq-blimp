@@ -3,11 +3,9 @@
 This repository contains evaluation, QC, and paper-analysis code for FreqBLiMP.
 The generator and final datasets live in the companion `freq-blimp` repository.
 
-The old dataset construction workflow that swapped lexical items inside
-existing BLiMP sentences has been archived. Current scripts assume
-generator-produced records with FreqBLiMP fields such as `good_freq`,
-`bad_freq`, `sentence_good`, `sentence_bad`, regime names `head`, `tail`, and
-`xtail`, and per-paradigm manifests.
+Current scripts assume generator-produced records with FreqBLiMP fields such as
+`good_freq`, `bad_freq`, `sentence_good`, `sentence_bad`, regime names `head`,
+`tail`, and `xtail`, and per-paradigm manifests.
 
 ## What Is Included
 
@@ -92,8 +90,6 @@ bundles outside Git and attach final bundles as release/artifact files.
 
 ## Repository Hygiene
 
-- `scripts/legacy/`, the old swap-generation entrypoints, and the old pipeline
-  module are archived locally under `.archive/` and ignored.
 - Keep source changes in Git, but keep model outputs, logs, local caches, and
   bulky result bundles out of Git.
 - The public repository should be named `freq-blimp-eval`; update the GitHub
