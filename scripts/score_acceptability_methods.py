@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 SUPPORTED_METHODS = (
+    "lp_readout",
     "nll",
     "in_template_lp",
     "in_template_meanlp",
@@ -132,6 +133,10 @@ def _parse_multi(values: Sequence[str]) -> List[str]:
     if len(values) == 1 and "," in values[0]:
         return [item.strip() for item in values[0].split(",") if item.strip()]
     return [item.strip() for item in values if item.strip()]
+
+
+def _method_component_key(method: str) -> str:
+    return "nll" if method == "lp_readout" else method
 
 
 def _collect_paths(data: Sequence[str], pattern: Optional[str]) -> List[Path]:
@@ -269,7 +274,7 @@ def _score_variant(
     if not texts:
         raise ValueError(f"No valid good/bad pairs found in {data_path} for variant={variant}.")
 
-    required = expand_required_components(pending_methods)
+    required = expand_required_components(_method_component_key(method) for method in pending_methods)
     plain_scores = None
     template_scores = None
     yes_no_scores = None
@@ -310,7 +315,7 @@ def _score_variant(
             good_text = texts[2 * i]
             bad_text = texts[2 * i + 1]
             row = None
-            if method == "nll":
+            if method in {"lp_readout", "nll"}:
                 assert plain_scores is not None
                 good_seq = plain_scores[2 * i]
                 bad_seq = plain_scores[2 * i + 1]

@@ -3,7 +3,7 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Set
 from wordfreq import zipf_frequency
 import wn
 
@@ -1450,6 +1450,40 @@ def _load_clause_verb_whitelists() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _clause_verb_review_blocklist(whitelists: dict, wh_marker: Optional[str]) -> Set[str]:
+    """
+    Return reviewed exclusions for clause-embedding verbs.
+
+    `that` exclusions apply globally because wh options back off to the same
+    clause-embedding inventory. Marker-specific exclusions are added only for
+    the matching wh class.
+    """
+    review = whitelists.get("review")
+    if not isinstance(review, dict):
+        return set()
+
+    blocked: Set[str] = set()
+
+    def add_flagged(section_name: str) -> None:
+        section = review.get(section_name)
+        if not isinstance(section, dict):
+            return
+        flagged = section.get("flagged")
+        if not isinstance(flagged, list):
+            return
+        for lemma in flagged:
+            if isinstance(lemma, str) and lemma.strip():
+                blocked.add(lemma.strip().lower())
+
+    add_flagged("that")
+    if wh_marker and isinstance(wh_marker, str):
+        marker = wh_marker.strip().lower()
+        if marker in {"what", "who"}:
+            add_flagged(marker)
+
+    return blocked
+
+
 def _clause_verb_options(
     target: VerbTarget, *, zipf_thr: Optional[float], zipf_min: Optional[float] = None
 ) -> List[str]:
@@ -1466,6 +1500,7 @@ def _clause_verb_options(
         raw = wh_map.get(target.wh_marker.strip().lower())
         if isinstance(raw, list):
             wh_list = raw
+    reviewed_blocked = _clause_verb_review_blocklist(whitelists, target.wh_marker)
 
     # Wh adjacency in COCA is noisy (often wh-objects like "buy what"), so for
     # BLiMP filler-gap tasks we rely on clause-embedding verbs (that/ccomp) for
@@ -1484,6 +1519,8 @@ def _clause_verb_options(
         if not norm or " " in norm or "_" in norm or "-" in norm:
             continue
         if norm in _VERB_EXCLUDE:
+            continue
+        if norm in reviewed_blocked:
             continue
         if norm in seen:
             continue

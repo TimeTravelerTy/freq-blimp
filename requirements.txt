@@ -11,3 +11,4 @@ torch
 transformers
 tqdm
 matplotlib
+scikit-learn

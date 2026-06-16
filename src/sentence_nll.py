@@ -7,6 +7,11 @@ try:  # pragma: no cover
     from tqdm import tqdm
 except ModuleNotFoundError:  # pragma: no cover
     tqdm = None
+try:  # pragma: no cover
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+except ImportError:  # pragma: no cover
+    AutoModelForImageTextToText = None  # type: ignore[assignment]
+    AutoProcessor = None  # type: ignore[assignment]
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
@@ -57,7 +62,9 @@ def _tokenizer_help_error(model_name: str) -> RuntimeError:
     msg = (
         f"Failed to load tokenizer for {model_name!r}. "
         "If this is a SentencePiece/LLama/Mistral tokenizer, install "
-        "`sentencepiece` and `protobuf` in your environment."
+        "`sentencepiece` and `protobuf` in your environment. "
+        "For newer multimodal checkpoints, you may also need a recent "
+        "`transformers` build and processor support."
     )
     return RuntimeError(msg)
 
@@ -95,21 +102,11 @@ class LlamaNLLScorer:
         self.device = torch.device(device)
         self.dtype = _select_dtype(self.device, dtype)
         tokenizer_source = tokenizer_name or model_name
-        tokenizer_kwargs = {"use_fast": use_fast}
-        if trust_remote_code:
-            tokenizer_kwargs["trust_remote_code"] = True
-        try:
-            self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
-        except Exception as exc:
-            if use_fast:
-                tokenizer_kwargs["use_fast"] = False
-                try:
-                    self.tokenizer = AutoTokenizer.from_pretrained(
-                        tokenizer_source, **tokenizer_kwargs
-                    )
-                except Exception as retry_exc:
-                    raise _tokenizer_help_error(tokenizer_source) from retry_exc
-            raise _tokenizer_help_error(tokenizer_source) from exc
+        self.tokenizer = self._load_tokenizer(
+            tokenizer_source=tokenizer_source,
+            use_fast=use_fast,
+            trust_remote_code=trust_remote_code,
+        )
         # Some tokenizers lack an explicit pad token; reuse EOS/UNK or add one.
         added_pad_token = False
         if self.tokenizer.pad_token_id is None:
@@ -130,10 +127,10 @@ class LlamaNLLScorer:
             model_kwargs["load_in_8bit"] = True
         if load_in_4bit:
             model_kwargs["load_in_4bit"] = True
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        self.model = self._load_model(model_name=model_name, model_kwargs=model_kwargs)
         if added_pad_token:
             self.model.resize_token_embeddings(len(self.tokenizer))
-        if self.model.config.pad_token_id is None:
+        if getattr(self.model.config, "pad_token_id", None) is None:
             self.model.config.pad_token_id = self.tokenizer.pad_token_id
         if device_map is None:
             self.model.to(self.device)
@@ -144,6 +141,51 @@ class LlamaNLLScorer:
                 self.model = torch.compile(self.model)
             except Exception:
                 pass
+
+    def _load_tokenizer(
+        self,
+        tokenizer_source: str,
+        use_fast: bool,
+        trust_remote_code: bool,
+    ):
+        tokenizer_kwargs = {"use_fast": use_fast}
+        if trust_remote_code:
+            tokenizer_kwargs["trust_remote_code"] = True
+        try:
+            return AutoTokenizer.from_pretrained(tokenizer_source, **tokenizer_kwargs)
+        except Exception as exc:
+            if use_fast:
+                retry_kwargs = dict(tokenizer_kwargs)
+                retry_kwargs["use_fast"] = False
+                try:
+                    return AutoTokenizer.from_pretrained(tokenizer_source, **retry_kwargs)
+                except Exception:
+                    pass
+            if AutoProcessor is not None:
+                processor_kwargs = {}
+                if trust_remote_code:
+                    processor_kwargs["trust_remote_code"] = True
+                try:
+                    processor = AutoProcessor.from_pretrained(tokenizer_source, **processor_kwargs)
+                    tokenizer = getattr(processor, "tokenizer", None)
+                    if tokenizer is not None:
+                        return tokenizer
+                except Exception:
+                    pass
+            raise _tokenizer_help_error(tokenizer_source) from exc
+
+    def _load_model(self, model_name: str, model_kwargs: Dict[str, object]):
+        try:
+            return AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        except Exception as exc:
+            if AutoModelForImageTextToText is not None:
+                try:
+                    return AutoModelForImageTextToText.from_pretrained(model_name, **model_kwargs)
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"Failed to load model for {model_name!r} as either a causal LM or image-text model."
+            ) from exc
 
     def score_texts(
         self,

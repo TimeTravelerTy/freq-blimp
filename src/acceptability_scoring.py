@@ -17,6 +17,7 @@ YES_NO_BASE_PROMPT = (
 )
 
 SUPPORTED_METHODS = (
+    "lp_readout",
     "nll",
     "in_template_lp",
     "in_template_meanlp",
@@ -26,6 +27,7 @@ SUPPORTED_METHODS = (
 )
 
 METHOD_COMPONENTS = {
+    "lp_readout": {"plain"},
     "nll": {"plain"},
     "in_template_lp": {"template"},
     "in_template_meanlp": {"template"},

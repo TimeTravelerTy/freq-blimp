@@ -1,154 +1,100 @@
-# Freq-BLiMP
+# FreqBLiMP Eval
 
-A pipeline for generating and evaluating **frequency-controlled BLiMP-style minimal pairs**.
+This repository contains evaluation, QC, and paper-analysis code for FreqBLiMP.
+The generator and final datasets live in the companion `freq-blimp` repository.
 
-This repository focuses on:
-- Creating frequency-swapped variants of BLiMP items (`good_freq` / `bad_freq`)
-- Scoring pairs with causal LMs via sentence NLL
-- Producing accuracy summaries and analysis plots
+The old dataset construction workflow that swapped lexical items inside
+existing BLiMP sentences has been archived. Current scripts assume
+generator-produced records with FreqBLiMP fields such as `good_freq`,
+`bad_freq`, `sentence_good`, `sentence_bad`, regime names `head`, `tail`, and
+`xtail`, and per-paradigm manifests.
 
-## What This Repo Does
+## What Is Included
 
-At a high level:
-1. Load BLiMP phenomena from a tier config
-2. Swap nouns/adjectives/verbs under Zipf-based constraints
-3. Write generated pairs with metadata (`good_freq`, `bad_freq`, swap traces, Zipf aggregates)
-4. Score generated/original pairs with one or more LMs
-5. Compute BLiMP accuracy and produce diagnostic plots
+- `scripts/score_acceptability_methods.py`: score minimal pairs with supported
+  acceptability methods.
+- `scripts/blimp_pair_scores_timestamp_batch.py`: batch pair scoring.
+- `scripts/blimp_accuracy.py`: accuracy summaries from pair-score JSONL files.
+- `scripts/qc_freq_blimp.py`: dataset QC checks.
+- `scripts/make_frequency_figures_current.py` and related `analyze_*` scripts:
+  paper analysis and figure/table generation.
+- `src/`: scoring, data-loading, lexical support, and analysis helpers.
+- `configs/`: BLiMP field and analysis configuration files.
+- `data/processed/blimp_original.jsonl`: original BLiMP comparison data.
+- `data/external/becl_lemma.tsv` and small processed support inventories used by
+  QC/analysis scripts.
 
-## Repository Layout
-
-- `scripts/make_freq_blimp.py`: Main dataset generator (single-run and batch)
-- `scripts/blimp_pair_scores_timestamp_batch.py`: Batch NLL scoring over datasets
-- `scripts/blimp_accuracy.py`: Accuracy computation from pair-score JSONL
-- `scripts/evaluate_freq_blimp.py`: End-to-end evaluate pipeline (score -> accuracy -> plots)
-- `scripts/plot_zipf_vs_nll.py`: Zipf vs NLL analysis
-- `scripts/plot_zipf_vs_token_len.py`: Zipf vs token-length analysis
-- `scripts/regime_diagnostics.py`: Window/regime diagnostics
-- `src/`: Core generation and scoring modules
-- `configs/`: Tier/config mapping files
-- `data/processed/`: Generated datasets and derived artifacts
-- `scripts/legacy/`: Older scripts preserved for reference
+Large model scores, paper result bundles, logs, and local outputs are ignored by
+Git. Publish or fetch those as external artifacts when needed.
 
 ## Setup
-
-### 1. Create environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 2. Install spaCy English model
-
-```bash
 python3 -m spacy download en_core_web_sm
 ```
 
-### 3. (Optional but common) Hugging Face auth
+For gated Hugging Face models, authenticate outside this repo before scoring.
 
-For gated models (e.g., Llama variants), authenticate first:
+## Expected Data
 
-```bash
-huggingface-cli login
+Point scripts at the final dataset in the generation repo:
+
+```text
+../freq-blimp/data/freqblimp/
+  head/
+  tail/
+  xtail/
 ```
 
-## Data Format
+Each regime contains 67 paper-scope paradigm files and matching manifests.
+Evaluation defaults should use the 67-subtask paper-scope set unless you
+explicitly include the two generator-only extra paradigms.
 
-Generated dataset records contain at least:
-- `phenomenon`, `subtask`, `field`, `idx`
-- `good_freq`, `bad_freq`
-- `meta.g_swaps`, `meta.b_swaps`
-- `meta.zipf_swapped_position_aggregates`
+## Score Acceptability
 
-Note:
-- Some scripts remain backward-compatible with older `good_rare` / `bad_rare` datasets.
-
-## Quick Start
-
-### Generate one dataset
+Score one or more dataset files with a causal LM:
 
 ```bash
-python3 scripts/make_freq_blimp.py \
-  --zipf_max_all 3.0 \
-  --zipf_min_all 2.2
+python3 scripts/score_acceptability_methods.py \
+  --pattern "../freq-blimp/data/freqblimp/head/*.jsonl" \
+  --models meta-llama/Llama-3.1-8B \
+  --methods lp_readout \
+  --variant freq \
+  --output-dir results/acceptability_pair_scores
 ```
 
-### Generate a batch with explicit windows
+`lp_readout` is the paper-facing name for the former plain-LM NLL scoring path.
+Raw score fields may still include `*_total_nll` because they store underlying
+negative log-likelihood values.
 
-```bash
-python3 scripts/make_freq_blimp.py \
-  --zipf-windows 1.2-2.0 2.2-3.0 3.6-5.0
-```
+## Summaries And Analysis
 
-### Dry-run batch commands
-
-```bash
-python3 scripts/make_freq_blimp.py \
-  --zipf-windows 1.2-2.0 2.2-3.0 \
-  --dry-run
-```
-
-### Evaluate datasets end-to-end
-
-```bash
-python3 scripts/evaluate_freq_blimp.py \
-  --data-pattern "data/processed/*freq_blimp*.jsonl" \
-  --variant auto
-```
-
-This produces:
-- Pair scores in `results/blimp_pair_scores/`
-- Accuracy JSON in `results/blimp_accuracy_runs/`
-- CSV summaries in `results/eval_runs/`
-- Plots/tables in `results/analysis_plots/`
-
-## Core Workflows
-
-### A) Generation only
-
-Use `scripts/make_freq_blimp.py` with either:
-- `--zipf-values` for fixed-point batches
-- `--zipf-windows` for lower/upper window batches
-
-Useful knobs:
-- `--swap_target` (`nouns`, `adjectives`, `verbs`, `all`)
-- `--limit`
-- `--match-token-count`
-- `--zipf_weighted_sampling --zipf_temp ...`
-
-### B) Scoring only
-
-```bash
-python3 scripts/blimp_pair_scores_timestamp_batch.py \
-  --pattern "data/processed/*freq_blimp*.jsonl" \
-  --models meta-llama/Llama-3.2-1B meta-llama/Llama-3.2-3B \
-  --variant auto
-```
-
-### C) Accuracy only
+Compute pair-score accuracy:
 
 ```bash
 python3 scripts/blimp_accuracy.py \
-  --scores results/blimp_pair_scores/<your_pair_scores_file>.jsonl
+  --scores results/acceptability_pair_scores/<pair-score-file>.jsonl
 ```
 
-## Important CLI Notes
+Run diagnostics or paper assets from scored outputs:
 
-- `--variant freq` is the canonical swapped-variant name.
-- `--variant rare` is accepted in some scripts for compatibility and mapped to `freq` behavior.
-- `scripts/legacy/` contains older utilities that may still use historical naming conventions.
+```bash
+python3 scripts/regime_diagnostics.py --help
+python3 scripts/make_frequency_figures_current.py --help
+python3 scripts/analyze_linguistic_frequency_effects.py --help
+```
 
-## Reproducibility Tips
+The analysis scripts write to `results/` by default. Keep generated result
+bundles outside Git and attach final bundles as release/artifact files.
 
-- Set `--seed` during generation.
-- Keep generated datasets in `data/processed/` and pair-scores in `results/blimp_pair_scores/`.
-- Use `--run-timestamp` in evaluation scripts when you want stable output file prefixes.
+## Repository Hygiene
 
-## Legacy Scripts
-
-Older scripts live in `scripts/legacy/`. They are kept for reference and prior analyses, but current workflows should use:
-- `scripts/make_freq_blimp.py`
-- `scripts/evaluate_freq_blimp.py`
-- `scripts/blimp_pair_scores_timestamp_batch.py`
+- `scripts/legacy/`, the old swap-generation entrypoints, and the old pipeline
+  module are archived locally under `.archive/` and ignored.
+- Keep source changes in Git, but keep model outputs, logs, local caches, and
+  bulky result bundles out of Git.
+- The public repository should be named `freq-blimp-eval`; update the GitHub
+  repository name/remote when publishing.
