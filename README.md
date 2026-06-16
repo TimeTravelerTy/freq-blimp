@@ -1,7 +1,9 @@
 # FreqBLiMP Eval
 
 This repository contains evaluation, QC, and paper-analysis code for FreqBLiMP.
-The generator and final datasets live in the companion `freq-blimp` repository.
+The generator and final datasets live in the companion
+[`freqblimp-generation`](https://github.com/TimeTravelerTy/freqblimp-generation)
+repository.
 
 Current scripts assume generator-produced records with FreqBLiMP fields such as
 `good_freq`, `bad_freq`, `sentence_good`, `sentence_bad`, regime names `head`,
