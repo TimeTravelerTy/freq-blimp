@@ -535,7 +535,19 @@ def main() -> None:
     ap.add_argument("--tokenizer", default=None)
     ap.add_argument("--use-slow-tokenizer", action="store_true")
     ap.add_argument("--trust-remote-code", action="store_true")
-    ap.add_argument("--padding-side", default="left", choices=["left", "right"])
+    ap.add_argument("--padding-side", default="right", choices=["left", "right"])
+    ap.add_argument(
+        "--position-ids",
+        default="attention-mask",
+        choices=["attention-mask", "model-default"],
+        help="Decoder positions: contiguous real-token positions (correct) or legacy model default.",
+    )
+    ap.add_argument(
+        "--score-dtype",
+        default="float32",
+        choices=["float32", "model"],
+        help="Dtype for log-softmax/softmax and score reductions after the model forward pass.",
+    )
     ap.add_argument("--good-field", default=None)
     ap.add_argument("--bad-field", default=None)
     ap.add_argument(
@@ -586,6 +598,8 @@ def main() -> None:
             use_fast=not args.use_slow_tokenizer,
             trust_remote_code=args.trust_remote_code,
             padding_side=args.padding_side,
+            use_attention_mask_position_ids=args.position_ids == "attention-mask",
+            score_in_float32=args.score_dtype == "float32",
         )
         for data_path in data_paths:
             print(f"\n[Dataset] {data_path}")

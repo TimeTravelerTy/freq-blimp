@@ -77,10 +77,19 @@ def _last_nonpad_indices(attention_mask: torch.Tensor) -> torch.Tensor:
     return attention_mask.shape[1] - 1 - from_right
 
 
+def _position_ids_from_attention_mask(attention_mask: torch.Tensor) -> torch.Tensor:
+    """Assign real tokens contiguous decoder positions, independent of padding."""
+    if attention_mask.ndim != 2:
+        raise ValueError("attention_mask must be rank 2")
+    position_ids = attention_mask.long().cumsum(-1) - 1
+    return position_ids.masked_fill(attention_mask == 0, 0)
+
+
 class LlamaNLLScorer:
     """
     Fast sentence-level NLL scorer for decoder-only models (defaults to Llama 3 8B).
-    Uses left padding, autocast, and no_grad/inference_mode to keep GPU passes quick.
+    Uses right padding, mask-derived position IDs, and autocast/inference_mode to
+    keep GPU passes quick while preserving unpadded decoder token positions.
     """
 
     def __init__(
@@ -93,7 +102,9 @@ class LlamaNLLScorer:
         compile_model: bool = False,
         use_fast: bool = True,
         trust_remote_code: bool = False,
-        padding_side: str = "left",
+        padding_side: str = "right",
+        use_attention_mask_position_ids: bool = True,
+        score_in_float32: bool = True,
         load_in_8bit: bool = False,
         load_in_4bit: bool = False,
     ):
@@ -101,6 +112,8 @@ class LlamaNLLScorer:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
         self.dtype = _select_dtype(self.device, dtype)
+        self.use_attention_mask_position_ids = use_attention_mask_position_ids
+        self.score_in_float32 = score_in_float32
         tokenizer_source = tokenizer_name or model_name
         self.tokenizer = self._load_tokenizer(
             tokenizer_source=tokenizer_source,
@@ -212,13 +225,16 @@ class LlamaNLLScorer:
             )
             input_ids = encoded["input_ids"].to(self.device, non_blocking=True)
             attention_mask = encoded["attention_mask"].to(self.device, non_blocking=True)
+            model_inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+            if self.use_attention_mask_position_ids:
+                model_inputs["position_ids"] = _position_ids_from_attention_mask(attention_mask)
             with torch.inference_mode():
                 with torch.amp.autocast(
                     device_type=self.device.type,
                     dtype=self.dtype,
                     enabled=use_amp,
                 ):
-                    outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                    outputs = self.model(**model_inputs)
             logits = outputs.logits
             if self.device.type == "mps":
                 # Some MPS reductions can produce NaNs here even when the forward
@@ -229,6 +245,8 @@ class LlamaNLLScorer:
             else:
                 shift_labels = input_ids[:, 1:]
                 shift_mask = attention_mask[:, 1:]
+            if self.score_in_float32:
+                logits = logits.float()
             logprobs = torch.log_softmax(logits, dim=-1)
             shift_logprobs = logprobs[:, :-1, :]
             nll = -shift_logprobs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
@@ -278,18 +296,23 @@ class LlamaNLLScorer:
             )
             input_ids = encoded["input_ids"].to(self.device, non_blocking=True)
             attention_mask = encoded["attention_mask"].to(self.device, non_blocking=True)
+            model_inputs = {"input_ids": input_ids, "attention_mask": attention_mask}
+            if self.use_attention_mask_position_ids:
+                model_inputs["position_ids"] = _position_ids_from_attention_mask(attention_mask)
             with torch.inference_mode():
                 with torch.amp.autocast(
                     device_type=self.device.type,
                     dtype=self.dtype,
                     enabled=use_amp,
                 ):
-                    outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                    outputs = self.model(**model_inputs)
             last_indices = _last_nonpad_indices(attention_mask)
             batch_indices = torch.arange(input_ids.shape[0], device=self.device)
             next_logits = outputs.logits[batch_indices, last_indices, :]
             if self.device.type == "mps":
                 next_logits = next_logits.float().cpu()
+            elif self.score_in_float32:
+                next_logits = next_logits.float()
             next_probs = torch.softmax(next_logits, dim=-1)
             for i in range(next_probs.shape[0]):
                 row: Dict[str, float] = {}
